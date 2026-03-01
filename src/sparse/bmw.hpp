@@ -576,9 +576,10 @@ namespace ndd {
                             query.indices[i], query.values[i], &it->second, this, txn);
 
                     // Negative query weights break the pruning upper-bound math
-                    if(query.values[i] < 0.0f) {
-                        use_pruning = false;
-                    }
+                    /*NOTE: We assume that weights can not be negative*/
+                    // if(query.values[i] < 0.0f) {
+                    //     use_pruning = false;
+                    // }
                 }
             }
 

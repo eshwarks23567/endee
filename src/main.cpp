@@ -34,6 +34,7 @@
 #include "core/ndd.hpp"
 #include "auth.hpp"
 #include "quant/common.hpp"
+#include "fifoworkq.hpp"
 #include "cpu_compat_check/check_avx_compat.hpp"
 #include "cpu_compat_check/check_arm_compat.hpp"
 
@@ -178,6 +179,9 @@ std::string get_mime_type(const std::string& path) {
 bool file_exists(const std::string& path) {
     return std::filesystem::exists(path) && std::filesystem::is_regular_file(path);
 }
+
+FIFOWorkQueue search_queue(16);   // 4 workers for search
+FIFOWorkQueue insert_queue(1);   // 2 workers for inserts
 
 int main(int argc, char** argv) {
 
@@ -729,15 +733,28 @@ int main(int argc, char** argv) {
 
                 LOG_DEBUG("Filter: " << filter_array.dump());
                 try {
-                    auto search_response = index_manager.searchKNN(index_id,
-                                                                   query,
-                                                                   sparse_indices,
-                                                                   sparse_values,
-                                                                   k,
-                                                                   filter_array,
-                                                                   filter_params,
-                                                                   include_vectors,
-                                                                   ef);
+                    // auto search_response = index_manager.searchKNN(index_id,
+                    //                                                query,
+                    //                                                sparse_indices,
+                    //                                                sparse_values,
+                    //                                                k,
+                    //                                                filter_array,
+                    //                                                filter_params,
+                    //                                                include_vectors,
+                    //                                                ef);
+
+                    // Offload heavy work to FIFO queue
+                    auto result = search_queue.submit([&, query, k, filter_array, 
+                                                        filter_params, include_vectors, ef,
+                                                        index_id]() {
+                        return index_manager.searchKNN(index_id, query, sparse_indices,
+                                                        sparse_values, k, filter_array,
+                                                        filter_params, include_vectors, ef);
+                    });
+
+                    // Block the Crow thread briefly waiting for result,
+                    // but the WORK is serialized FIFO across all clients
+                    auto search_response = result.get();
                     if(!search_response) {
                         return json_error(404, "Index not found or search failed");
                     }
@@ -1116,17 +1133,19 @@ int main(int argc, char** argv) {
         return response;
     });
 
-    unsigned int num_cores = std::thread::hardware_concurrency();
+    unsigned int num_cores = std::thread::hardware_concurrency() * 3;
     LOG_INFO("Number of processor cores: " << num_cores);
     if(settings::NUM_SERVER_THREADS == 0) {
         // Run on max possible threads
         LOG_INFO("Using all available threads");
-        app.port(settings::SERVER_PORT).multithreaded().run();
-    } else {
-        // Limit on the number of threads
-        LOG_INFO("Using " << settings::NUM_SERVER_THREADS << " threads");
-        app.port(settings::SERVER_PORT).concurrency(settings::NUM_SERVER_THREADS).run();
+        // app.port(settings::SERVER_PORT).multithreaded().run();
+        app.port(settings::SERVER_PORT).timeout(5).concurrency(num_cores).run();
     }
+    // else {
+    //     // Limit on the number of threads
+    //     LOG_INFO("Using " << settings::NUM_SERVER_THREADS << " threads");
+    //     app.port(settings::SERVER_PORT).concurrency(settings::NUM_SERVER_THREADS).run();
+    // }
 
     return 0;
 }
