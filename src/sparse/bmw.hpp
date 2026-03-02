@@ -1,12 +1,28 @@
 #pragma once
 
 /**
- * This code implements Block-Max WAND search index using MDBX.
- * This algorithm is an optimization of the WAND (Weak AND) algorithm
- * used to skip large portions of the index that cannot possibly rank in
- * the top-K results.
+ * Inverted index for sparse vector similarity search.
  *
- * It is designed for high performance retrieval of sparse vector spaces.
+ * Sparse vectors represent documents as (term_id, weight) pairs — most
+ * entries are zero.  To find the top-K documents most similar to a query
+ * vector we need to compute dot products:
+ *
+ *     score(doc) = sum over matching terms of (query_weight * doc_weight)
+ *
+ * The search algorithm processes documents in contiguous ID batches.  For each
+ * batch it accumulates partial dot-product scores into a flat buffer, then
+ * pushes the best scores into a min-heap of size K.  A lightweight pruning
+ * step can skip large sections of the longest posting list when their upper
+ * bound cannot beat the current K-th best score.
+ *
+ * Storage uses MDBX.  Each term's posting list is stored as a single key-value
+ * pair:
+ *     key   = term_id  (uint32)
+ *     value = PostingListHeader | doc_ids[n] (uint32) | values[n] (uint8 or float)
+ *
+ * Values are either stored as raw floats (NDD_BMW_STORE_FLOAT_VALUES) or
+ * quantized to uint8 relative to the list's max value to save space.
+ * Deleted entries are tombstoned (value = 0) and periodically compacted.
  */
 
 #include <vector>
@@ -39,240 +55,126 @@
 
 namespace ndd {
 
+    static constexpr ndd::idInt EXHAUSTED_DOC_ID = std::numeric_limits<ndd::idInt>::max();
+
+    // ---------- On-disk header for a posting list ----------
+    // Stored at the start of every MDBX value.  Packed to avoid
+    // compiler-inserted padding so sizeof() matches the on-disk size.
 #pragma pack(push, 1)
-    struct BlockIdx {
-        ndd::idInt start_doc_id;
-        float block_max_value;
-
-        BlockIdx() = default;
-        BlockIdx(ndd::idInt start, float max_val) :
-            start_doc_id(start),
-            block_max_value(max_val) {}
+    struct PostingListHeader {
+        uint8_t version = 5;       // format version
+        uint32_t n = 0;            // total number of entries (including tombstones)
+        uint32_t live_count = 0;   // entries with value > 0
+        float max_value = 0.0f;    // largest weight in the list (used for quantization & pruning)
     };
-
-    // Block header for term_blocks data
-    struct BlockHeader {
-        uint8_t version = 3;      // Version 3: SoA layout, uint8 values (quantized)
-        uint8_t diff_bits = 16;   // 16, 32, or 64 bit doc diffs. Default to 16 for compression.
-        uint16_t n = 0;           // total stored (incl. tombstones)
-        uint16_t live_count = 0;  // nonzero entries
-        uint16_t padding = 0;     // explicit padding
-        float block_max_value = 0.0f;  // max value in block (for WAND)
-        uint32_t alignment_pad = 0;    // Ensure 16-byte alignment for payload
-
-        static constexpr size_t HEADER_SIZE = 16;
-    };
-
-    // Entry in a block (In-memory representation)
-    struct BlockEntry {
-        ndd::idInt doc_diff;  // difference from block start_doc_id
-        float value;          // stored as float in memory, quantized to uint8 on disk
-
-        BlockEntry() = default;
-        BlockEntry(ndd::idInt diff, float val) :
-            doc_diff(diff),
-            value(val) {}
-
-        bool operator<(const BlockEntry& other) const { return doc_diff < other.doc_diff; }
-    };
-
 #pragma pack(pop)
 
-    // BMW search candidate
+    struct PostingListEntry {
+        ndd::idInt doc_id;
+        float value;
+
+        PostingListEntry() : doc_id(0), value(0.0f) {}
+        PostingListEntry(ndd::idInt id, float val) : doc_id(id), value(val) {}
+    };
+
+    // ---------- Min-heap element for top-K collection ----------
     struct BMWCandidate {
         ndd::idInt doc_id;
         float score;
 
-        BMWCandidate(ndd::idInt id, float s) :
-            doc_id(id),
-            score(s) {}
+        BMWCandidate(ndd::idInt id, float s) : doc_id(id), score(s) {}
 
         bool operator<(const BMWCandidate& other) const {
-            return score > other.score;  // Min-heap (lowest scores first)
+            return score > other.score;  //lowest score on top
         }
     };
 
     class BMWIndex {
     public:
-        static constexpr uint8_t CURRENT_VERSION = 3;
-
         BMWIndex(MDBX_env* env, size_t vocab_size) :
             env_(env),
             vocab_size_(vocab_size) {}
 
         ~BMWIndex() = default;
 
-        // Initialize databases
         bool initialize() {
             std::unique_lock<std::shared_mutex> lock(mutex_);
 
-            // Open LMDB databases
             MDBX_txn* txn;
             int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
-            if(rc != 0) {
-                LOG_ERROR("Failed to begin transaction: " << mdbx_strerror(rc));
+            if (rc != 0) {
+                LOG_ERROR("Failed to begin init transaction: " << mdbx_strerror(rc));
                 return false;
             }
 
-            // Create term_blocks database
-            rc = mdbx_dbi_open(txn, "term_blocks", MDBX_CREATE, &term_blocks_dbi_);
-            if(rc != 0) {
-                LOG_ERROR("Failed to open term_blocks database: " << mdbx_strerror(rc));
-                mdbx_txn_abort(txn);
-                return false;
-            }
-
-            // Create term_blocks_index database
-            rc = mdbx_dbi_open(txn, "term_blocks_index", MDBX_CREATE, &term_blocks_index_dbi_);
-            if(rc != 0) {
-                LOG_ERROR("Failed to open term_blocks_index database: " << mdbx_strerror(rc));
+            rc = mdbx_dbi_open(txn, "term_postings",
+                                MDBX_CREATE | MDBX_INTEGERKEY, &term_postings_dbi_);
+            if (rc != 0) {
+                LOG_ERROR("Failed to open term_postings dbi: " << mdbx_strerror(rc));
                 mdbx_txn_abort(txn);
                 return false;
             }
 
             rc = mdbx_txn_commit(txn);
-            if(rc != 0) {
-                LOG_ERROR("Failed to commit initialization transaction: " << mdbx_strerror(rc));
+            if (rc != 0) {
+                LOG_ERROR("Failed to commit init transaction: " << mdbx_strerror(rc));
                 return false;
             }
 
-            // Load existing term blocks index
-            return loadTermBlocksIndex();
+            return loadTermInfo();
         }
 
-        // Batch operations - Removed empty implementation
-
-        // Transaction-aware methods for external orchestration
+        // Insert or update a batch of documents in the index.
         bool addDocumentsBatch(MDBX_txn* txn,
-                               const std::vector<std::pair<ndd::idInt, SparseVector>>& docs) {
+                                const std::vector<std::pair<ndd::idInt, SparseVector>>& docs) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             return addDocumentsBatchInternal(txn, docs);
         }
 
-        /*XXX: NOT TESTED*/
+        /**
+         * Remove a single document from the index by tombstoning its
+         * entries (setting the weight to 0)
+         */
         bool removeDocument(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             return removeDocumentInternal(txn, doc_id, vec);
         }
 
-        bool splitBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt start_doc_id) {
-            auto& blocks = term_blocks_index_[term_id];
-            auto block_it = findBlockIterator(blocks, start_doc_id);
-
-            // Verify we found the correct block
-            if(block_it == blocks.end() || block_it->start_doc_id != start_doc_id) {
-                return false;
-            }
-
-            auto entries = loadBlock(txn, term_id, start_doc_id);
-            if(entries.size() <= settings::MAX_BMW_BLOCK_SIZE) {
-                return true;
-            }
-
-            // Split point (middle)
-            size_t split_idx = entries.size() / 2;
-            ndd::idInt new_start_doc_id = start_doc_id + entries[split_idx].doc_diff;
-
-            std::vector<BlockEntry> first_half(entries.begin(), entries.begin() + split_idx);
-            std::vector<BlockEntry> second_half;
-            second_half.reserve(entries.size() - split_idx);
-
-            // Re-calculate diffs for second half
-            ndd::idInt base_diff = entries[split_idx].doc_diff;
-            for(size_t i = split_idx; i < entries.size(); ++i) {
-                second_half.emplace_back(entries[i].doc_diff - base_diff, entries[i].value);
-            }
-
-            // Calculate max values for both new blocks
-            float max1 = 0.0f, max2 = 0.0f;
-
-            for(const auto& e : first_half) {
-                if(e.value > 0) {
-                    max1 = std::max(max1, e.value);
-                }
-            }
-            for(const auto& e : second_half) {
-                if(e.value > 0) {
-                    max2 = std::max(max2, e.value);
-                }
-            }
-
-            // Update first block metadata
-            block_it->block_max_value = max1;
-
-            // Save first block
-            BlockHeader h1;
-            h1.n = static_cast<uint16_t>(first_half.size());
-            h1.live_count = 0;
-            for(const auto& e : first_half) {
-                if(e.value > 0) {
-                    h1.live_count++;
-                }
-            }
-            h1.block_max_value = max1;
-
-            if(!saveBlock(txn, term_id, start_doc_id, first_half, h1)) {
-                return false;
-            }
-
-            // Insert second block metadata
-            // Note: block_it might be invalidated by insert, so calculate index first
-            size_t idx = std::distance(blocks.begin(), block_it);
-            blocks.insert(blocks.begin() + idx + 1, BlockIdx(new_start_doc_id, max2));
-
-            // Save second block
-            BlockHeader h2;
-            h2.n = static_cast<uint16_t>(second_half.size());
-            h2.live_count = 0;
-            for(const auto& e : second_half) {
-                if(e.value > 0) {
-                    h2.live_count++;
-                }
-            }
-            h2.block_max_value = max2;
-
-            if(!saveBlock(txn, term_id, new_start_doc_id, second_half, h2)) {
-                return false;
-            }
-
-            return true;
-        }
-
-        // Statistics
         size_t getTermCount() const {
-            std::shared_lock<std::shared_mutex> lock(mutex_);
-            return term_blocks_index_.size();
-        }
-
-        size_t getBlockCount() const {
-            std::shared_lock<std::shared_mutex> lock(mutex_);
-            size_t total = 0;
-            for(const auto& [term_id, blocks] : term_blocks_index_) {
-                if(!blocks.empty() && blocks.front().start_doc_id == GLOBAL_MAX_SENTINEL_DOC_ID) {
-                    total += (blocks.size() - 1);
-                } else {
-                    total += blocks.size();
-                }
-            }
-            return total;
+            return term_info_.size();
         }
 
         size_t getVocabSize() const { return vocab_size_; }
 
-        /// Instead of DAAT pivot-based iteration (WAND), this:
-        ///   1. Processes doc IDs in contiguous batches of BATCH_SIZE
-        ///   2. Accumulates dot-product scores into a flat array per batch
-        ///   3. Prunes only the longest posting list using block-level suffix-max
-        ///
-        /// Trade-off vs BMW/WAND:
-        ///   - Simpler: no pivot selection, no iterator sorting
-        ///   - More cache-friendly: sequential writes to score buffer
-        ///   - Less aggressive pruning: only prunes one list, not all
+        /**
+         * =====================================================================
+         * Search — batched dot-product accumulation with pruning
+         * =====================================================================
+         *
+         * Algorithm overview:
+         *
+         * 1. For each query term, open a read-only iterator over its
+         * posting list (zero-copy pointer into the MDBX page).
+         *
+         * 2. Process document IDs in contiguous batches of BATCH_SIZE.
+         * - For each posting list, walk entries whose doc_id falls
+         * within [batch_start, batch_end].
+         * - Accumulate: scores_buf[doc_id - batch_start] += doc_weight * query_weight
+         *
+         * 3. After accumulating, scan the buffer for scores that beat the
+         * current K-th best. Push winners into a min-heap of size K.
+         *
+         * 4. Between batches, try to prune the longest posting list: if
+         * its maximum possible contribution (global_max * query_weight)
+         * cannot beat the current K-th best, skip ahead.
+         *
+         * 5. Repeat until all iterators are exhausted.
+         */
         std::vector<std::pair<ndd::idInt, float>>
         searchBatched(const SparseVector& query,
-                    size_t k,
-                    const ndd::RoaringBitmap* filter = nullptr) {
-            if(query.empty() || k == 0) {
+                        size_t k,
+                        const ndd::RoaringBitmap* filter = nullptr) {
+            if (query.empty() || k == 0) {
                 return {};
             }
 
@@ -280,852 +182,443 @@ namespace ndd {
 
             MDBX_txn* txn;
             int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
-            if(rc != 0) {
+            if (rc != 0) {
                 LOG_ERROR("Failed to begin search transaction: " << mdbx_strerror(rc));
                 return {};
             }
 
             static constexpr size_t BATCH_SIZE = 10000;
 
-            // ── STEP 1: Initialize iterators ──
+            // -- STEP 1: Build an iterator per query term --
 
-            std::vector<BlockIterator> iterators_storage;
-            iterators_storage.reserve(query.indices.size());
+            std::vector<PostingListIterator> iters_storage;
+            std::vector<PostingListIterator*> iters;
+            iters_storage.reserve(query.indices.size());
+            iters.reserve(query.indices.size());
 
-            bool use_pruning = true;
+            for (size_t qi = 0; qi < query.indices.size(); qi++) {
+                uint32_t term_id = query.indices[qi];
+                float qw = query.values[qi];
+                if (qw <= 0.0f) continue;
 
-            for(size_t i = 0; i < query.indices.size(); ++i) {
-                auto it = term_blocks_index_.find(query.indices[i]);
-                if(it != term_blocks_index_.end()) {
-                    iterators_storage.emplace_back(
-                            query.indices[i], query.values[i], &it->second, this, txn);
+                auto info_it = term_info_.find(term_id);
+                if (info_it == term_info_.end()) continue;
 
-                    // Negative query weights break the pruning upper-bound math
-                    /*NOTE: We assume that weights can not be negative*/
-                    // if(query.values[i] < 0.0f) {
-                    //     use_pruning = false;
-                    // }
+                PostingListView view = getReadOnlyPostingList(txn, term_id);
+                if (view.doc_ids == nullptr || view.count == 0) continue;
+
+                PostingListIterator it;
+                it.term_id = term_id;
+                it.term_weight = qw;
+                it.global_max = info_it->second;
+                it.index = this;
+                it.init(view);
+
+                if (it.current_doc_id != EXHAUSTED_DOC_ID) {
+                    iters_storage.push_back(it);
                 }
             }
 
-            // Build pointer array (non-exhausted iterators only)
-            std::vector<BlockIterator*> iters;
-            iters.reserve(iterators_storage.size());
-            for(auto& it : iterators_storage) {
-                if(it.current_doc_id != std::numeric_limits<ndd::idInt>::max()) {
-                    iters.push_back(&it);
-                }
+            for (size_t i = 0; i < iters_storage.size(); i++) {
+                iters.push_back(&iters_storage[i]);
             }
 
-            if(iters.empty()) {
+            if (iters.empty()) {
                 mdbx_txn_abort(txn);
                 return {};
             }
 
-            // ── STEP 2: Prepare search state ──
+            // -- STEP 2: Prepare scoring state --
 
-            std::priority_queue<BMWCandidate> top_results;  // min-heap (lowest score on top)
-            float threshold = 0.0f;
-            float best_min_score = -std::numeric_limits<float>::infinity();
+            bool use_pruning = (iters.size() > 1);
+            float best_min_score = 0.0f;
 
-            // Reusable score buffer — allocated once, zeroed per batch
             std::vector<float> scores_buf(BATCH_SIZE, 0.0f);
+            std::priority_queue<BMWCandidate> top_results;  // min-heap of size k
+            float threshold = 0.0f;  // score of the current k-th best result
 
-            // Helper: find minimum doc_id across all active iterators
-            auto find_min_id = [&]() -> ndd::idInt {
-                ndd::idInt m = std::numeric_limits<ndd::idInt>::max();
-                for(auto* it : iters) {
-                    if(it->current_doc_id < m) {
-                        m = it->current_doc_id;
-                    }
+
+            // start iterating from the smallest doc_id across all iterators
+            ndd::idInt min_id = EXHAUSTED_DOC_ID;
+            for (size_t i = 0; i < iters.size(); i++) {
+                if (iters[i]->current_doc_id < min_id) {
+                    min_id = iters[i]->current_doc_id;
                 }
-                return m;
-            };
+            }
 
-            ndd::idInt min_id = find_min_id();
+            // -- STEP 3: Main scoring loop, one batch per iteration --
 
-            // ── STEP 3: Main batch loop ──
-
-            while(min_id != std::numeric_limits<ndd::idInt>::max()) {
-
-                // Compute batch range
+            while (min_id != EXHAUSTED_DOC_ID) {
                 ndd::idInt batch_start = min_id;
-                ndd::idInt batch_end = batch_start + static_cast<ndd::idInt>(BATCH_SIZE) - 1;
-                if(batch_end < batch_start) {
-                    batch_end = std::numeric_limits<ndd::idInt>::max() - 1;  // overflow guard
+                ndd::idInt batch_end = batch_start + (ndd::idInt)BATCH_SIZE - 1;
+                if (batch_end < batch_start) {
+                    batch_end = EXHAUSTED_DOC_ID - 1;  // overflow guard
                 }
-                size_t batch_len = static_cast<size_t>(batch_end - batch_start) + 1;
+                size_t batch_len = (size_t)(batch_end - batch_start) + 1;
 
-                // Ensure buffer is large enough (should be BATCH_SIZE but guard anyway)
-                if(batch_len > scores_buf.size()) {
+                if (batch_len > scores_buf.size()) {
                     scores_buf.resize(batch_len);
                 }
-
-                // Zero score buffer for this batch
                 std::memset(scores_buf.data(), 0, batch_len * sizeof(float));
 
-                // ── 3a: Accumulate dot-product scores ──
+                // 3a — Accumulate partial dot-product scores.
                 //
-                // For each posting list, walk all entries with doc_id in [batch_start, batch_end].
-                // Accumulate: scores[doc_id - batch_start] += stored_weight * query_weight
-                //
-                // This is the Qdrant "advance_batch" core loop.
+                // For each posting list, walk entries with doc_id in
+                // [batch_start, batch_end] and add weight * query_weight
+                // into the score buffer.
 
-                for(auto* it : iters) {
+                for (size_t i = 0; i < iters.size(); i++) {
+                    PostingListIterator* it = iters[i];
                     float qw = it->term_weight;
-                    it->for_each_till_id(batch_end, [&](ndd::idInt doc_id, float weight) {
-                        size_t local = static_cast<size_t>(doc_id - batch_start);
-                        scores_buf[local] += weight * qw;
-                    });
+
+                    const uint32_t* ids = it->doc_ids;
+                    uint32_t idx = it->current_entry_idx;
+                    uint32_t sz  = it->data_size;
+
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+                    const float* vals = (const float*)it->values_ptr;
+                    while (idx < sz && ids[idx] <= batch_end) {
+                        if (vals[idx] > 0.0f) {
+                            size_t local = (size_t)(ids[idx] - batch_start);
+                            scores_buf[local] += vals[idx] * qw;
+                        }
+                        idx++;
+                    }
+#else
+                    const uint8_t* vals = (const uint8_t*)it->values_ptr;
+                    float scale = it->max_value / UINT8_MAX;
+                    while (idx < sz && ids[idx] <= batch_end) {
+                        if (vals[idx] > 0) {
+                            size_t local = (size_t)(ids[idx] - batch_start);
+                            scores_buf[local] += ((float)vals[idx] * scale) * qw;
+                        }
+                        idx++;
+                    }
+#endif
+
+                    it->current_entry_idx = idx;
+                    it->advanceToNextLive();
                 }
 
-                // ── 3b: Collect results from score buffer ──
+                // 3b — Scan the score buffer and keep the top K.
 
-                for(size_t local = 0; local < batch_len; ++local) {
+                for (size_t local = 0; local < batch_len; local++) {
                     float s = scores_buf[local];
-                    if(s == 0.0f || s <= threshold) {
-                        continue;
-                    }
+                    if (s == 0.0f || s <= threshold) continue;
 
-                    ndd::idInt real_id = batch_start + static_cast<ndd::idInt>(local);
+                    ndd::idInt doc_id = batch_start + (ndd::idInt)local;
+                    if (filter && !filter->contains(doc_id)) continue;
 
-                    if(filter && !filter->contains(real_id)) {
-                        continue;
-                    }
-
-                    if(top_results.size() < k) {
-                        top_results.emplace(real_id, s);
-                        if(top_results.size() == k) {
+                    if (top_results.size() < k) {
+                        top_results.emplace(doc_id, s);
+                        if (top_results.size() == k) {
                             threshold = top_results.top().score;
                         }
-                    } else if(s > threshold) {
+                    } else if (s > threshold) {
                         top_results.pop();
-                        top_results.emplace(real_id, s);
+                        top_results.emplace(doc_id, s);
                         threshold = top_results.top().score;
                     }
                 }
 
-                // ── 3c: Remove exhausted iterators ──
+                // 3c — Drop any iterators that have no more entries.
 
-                iters.erase(std::remove_if(iters.begin(),
-                                            iters.end(),
-                                            [](const BlockIterator* it) {
-                                                return it->current_doc_id
-                                                    == std::numeric_limits<ndd::idInt>::max();
-                                            }),
-                            iters.end());
-
-                if(iters.empty()) {
-                    break;
-                }
-
-                // ── 3d: Single iterator shortcut ──
-                //
-                // When only one posting list remains, no accumulation is needed.
-                // Score each element directly: score = weight * query_weight.
-
-                if(iters.size() == 1) {
-                    auto* it = iters[0];
-                    float qw = it->term_weight;
-                    while(it->current_doc_id != std::numeric_limits<ndd::idInt>::max()) {
-                        float s = it->current_score * qw;
-                        ndd::idInt doc_id = it->current_doc_id;
-                        it->next();
-
-                        if(filter && !filter->contains(doc_id)) {
-                            continue;
-                        }
-                        if(top_results.size() < k) {
-                            top_results.emplace(doc_id, s);
-                            if(top_results.size() == k) {
-                                threshold = top_results.top().score;
-                            }
-                        } else if(s > threshold) {
-                            top_results.pop();
-                            top_results.emplace(doc_id, s);
-                            threshold = top_results.top().score;
-                        }
+                size_t write_idx = 0;
+                for (size_t i = 0; i < iters.size(); i++) {
+                    if (iters[i]->current_doc_id != EXHAUSTED_DOC_ID) {
+                        iters[write_idx++] = iters[i];
                     }
-                    break;
+                }
+                iters.resize(write_idx);
+                if (iters.empty()) break;
+
+                // 3d — Find where the next batch starts.
+
+                min_id = EXHAUSTED_DOC_ID;
+                for (size_t i = 0; i < iters.size(); i++) {
+                    if (iters[i]->current_doc_id < min_id) {
+                        min_id = iters[i]->current_doc_id;
+                    }
                 }
 
-                // ── 3e: Find next batch start ──
+                // 3e — Pruning.  See pruneLongest() for details.
 
-                min_id = find_min_id();
-
-                // ── 3f: Pruning ──
-                //
-                // If we have enough results, try to skip elements in the longest
-                // posting list that can't beat the current threshold.
-                // Only attempt if threshold improved since last prune (avoid wasted work).
-
-                if(use_pruning && top_results.size() >= k) {
+                if (use_pruning && top_results.size() >= k) {
                     float new_min_score = threshold;
-                    if(new_min_score != best_min_score) {
+                    if (new_min_score != best_min_score) {
                         best_min_score = new_min_score;
                         pruneLongest(iters, new_min_score);
 
-                        // Recompute min_id — pruning may have advanced an iterator
-                        min_id = find_min_id();
+                        min_id = EXHAUSTED_DOC_ID;
+                        for (size_t i = 0; i < iters.size(); i++) {
+                            if (iters[i]->current_doc_id < min_id) {
+                                min_id = iters[i]->current_doc_id;
+                            }
+                        }
                     }
                 }
             }
 
-            // ── STEP 4: Extract and return results ──
+            // -- STEP 4: Return results in descending score order --
 
             mdbx_txn_abort(txn);
 
             std::vector<std::pair<ndd::idInt, float>> results;
             results.reserve(top_results.size());
-            while(!top_results.empty()) {
-                results.emplace_back(top_results.top().doc_id, top_results.top().score);
+            while (!top_results.empty()) {
+                results.push_back(
+                    std::make_pair(top_results.top().doc_id, top_results.top().score));
                 top_results.pop();
             }
-            // Min-heap gives ascending order; reverse for descending
             std::reverse(results.begin(), results.end());
             return results;
         }
 
     private:
-        // static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = 0;
-        static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = std::numeric_limits<ndd::idInt>::max();
+        MDBX_env* env_;
+        // MDBX database handle: term_id -> posting list bytes
+        MDBX_dbi term_postings_dbi_;
+        size_t vocab_size_;
 
-        static size_t firstRealBlockIndex(const std::vector<BlockIdx>& blocks) {
-            if(!blocks.empty() && blocks.front().start_doc_id == GLOBAL_MAX_SENTINEL_DOC_ID) {
-                return 1;
-            }
-            return 0;
-        }
+        // In-memory cache: term_id -> global max weight in that posting list.
+        // Populated at startup by scanning all posting list headers.
+        // Used during search for pruning upper-bound calculations.
+        std::unordered_map<uint32_t, float> term_info_;
 
-        std::vector<BlockIdx>::iterator findBlockIterator(std::vector<BlockIdx>& blocks,
-                                                            ndd::idInt doc_id) {
-            size_t first_idx = firstRealBlockIndex(blocks);
-            if(first_idx >= blocks.size()) {
-                return blocks.end();
-            }
-
-            auto begin_it = blocks.begin() + static_cast<std::ptrdiff_t>(first_idx);
-            auto it = std::upper_bound(begin_it,
-                                        blocks.end(),
-                                        doc_id,
-                                        [](ndd::idInt doc_id, const BlockIdx& block) {
-                                            return doc_id < block.start_doc_id;
-                                        });
-
-            if(it == begin_it) {
-                return it;
-            }
-            return it - 1;
-        }
-
-        std::vector<BlockIdx>::const_iterator findBlockIterator(const std::vector<BlockIdx>& blocks,
-                                                                ndd::idInt doc_id) const {
-            size_t first_idx = firstRealBlockIndex(blocks);
-            if(first_idx >= blocks.size()) {
-                return blocks.end();
-            }
-
-            auto begin_it = blocks.begin() + static_cast<std::ptrdiff_t>(first_idx);
-            auto it = std::upper_bound(begin_it,
-                                        blocks.end(),
-                                        doc_id,
-                                        [](ndd::idInt doc_id, const BlockIdx& block) {
-                                            return doc_id < block.start_doc_id;
-                                        });
-
-            if(it == begin_it) {
-                return it;
-            }
-            return it - 1;
-        }
+        mutable std::shared_mutex mutex_;  // readers (search) vs writers (add/remove)
 
         /**
-         * The quantize and dequantize functions are there to reduce the memory
-         * and storage footprint of the sparse values (float 32 to int8).
+         * =====================================================================
+         * Quantization
+         * =====================================================================
          *
-         * XXX: Here we are assuming that sparse vectors can never have -ve values.
-         */
-        // Helper for uint8 quantization
-        static inline uint8_t quantize(float val, float max_val) {
-            if(max_val <= settings::NEAR_ZERO) {
-                return 0;
-            }
-            float scaled = (val / max_val) * UINT8_MAX;
-            if(scaled >= UINT8_MAX) {
-                return UINT8_MAX;
-            }
-            if (scaled <= 0.0f)   return 0;
+         * When NDD_BMW_STORE_FLOAT_VALUES is not defined, weights are stored
+         * as uint8 values [0..255] relative to the posting list's max_value.
+         * This halves storage compared to float but introduces small rounding.
+         *
+         * NOTE: quantize(0) returns 0 which doubles as the tombstone marker, so
+         * we clamp live entries to at least 1.
+        */
 
-            uint8_t result = static_cast<uint8_t>(scaled + 0.5f);
-            // return result;
-            return result == 0 ? 1 : result;  // preserve live entries
+        static inline uint8_t quantize(float val, float max_val) {
+            if (max_val <= settings::NEAR_ZERO)
+                return 0;
+            float scaled = (val / max_val) * UINT8_MAX;
+            
+            if (scaled >= UINT8_MAX)
+                return UINT8_MAX;
+            
+            if (scaled <= 0.0f)
+                return 0;
+            
+            uint8_t result = (uint8_t)(scaled + 0.5f);
+
+            return result == 0 ? 1 : result;  // keep live entries non-zero
         }
 
         static inline float dequantize(uint8_t val, float max_val) {
-            // If max_val is near zero, the result is effectively zero
-            if (max_val <= settings::NEAR_ZERO) {
+            if(max_val <= settings::NEAR_ZERO)
                 return 0.0f;
-            }
-
-            // Use a single multiplier to avoid multiple floating point ops
-            const float scale = max_val / UINT8_MAX;
-            return static_cast<float>(val) * scale;
+            
+            return (float)val * (max_val / UINT8_MAX);
         }
 
-
-        // Helper struct for getReadOnlyBlock return value
-        struct BlockView {
-            const void* doc_diffs;  // Can be uint16_t* or uint32_t*
-            const void* values;
-            size_t count;
-            uint8_t diff_bits;  // 16 or 32
-            uint8_t value_bits; // 8 (quantized) or 32 (float)
+        /**
+         * =====================================================================
+         * PostingListView — zero-copy read into an MDBX page
+         * =====================================================================
+         *
+         * MDBX returns a pointer directly into its memory-mapped page.
+         * We never copy the data; the pointers are valid for the lifetime
+         * of the read transaction.
+        */
+        struct PostingListView {
+            const uint32_t* doc_ids;  // sorted array of document IDs
+            const void* values;       // uint8_t* (quantized) or float* depending on build
+            uint32_t count;           // number of entries
+            uint8_t value_bits;       // 8 = quantized uint8, 32 = raw float
+            float max_value;          // max weight (from header, for dequantization)
         };
 
-        struct BlockIterator {
+        /**
+         * =====================================================================
+         * PostingListIterator — walks one posting list during search
+         * =====================================================================
+         *
+         * Points into the zero-copy MDBX data. Maintains a cursor
+         * (current_entry_idx / current_doc_id) that advances forward only.
+         * Tombstoned entries (value == 0) are automatically skipped.
+        */
+        struct PostingListIterator {
             uint32_t term_id;
-            float term_weight;
-            const std::vector<BlockIdx>* blocks;
-            size_t first_block_idx;
-            size_t current_block_idx;
-            float global_term_max;
+            float term_weight;     // query weight for this term
+            float global_max;      // max stored weight in this posting list
+            const BMWIndex* index; // back-pointer for SIMD helper access
 
-            // SoA pointers
-            const void* doc_diffs_ptr = nullptr;  // Can be u16 or u32
-            const void* values_ptr = nullptr;
-            size_t block_data_size = 0;
-            uint8_t diff_bits = 32;
-            uint8_t value_bits = 8;
+            const uint32_t* doc_ids;    // zero-copy pointer to doc_id array
+            const void* values_ptr;     // zero-copy pointer to values array
+            uint32_t data_size;         // total entry count
+            uint8_t value_bits;         // 8 or 32
+            float max_value;            // for dequantization
 
-            size_t current_entry_idx;
-            ndd::idInt current_doc_id;
-            float current_score;
-            BMWIndex* index;
-            MDBX_txn* txn;
-            std::vector<float> suffix_block_max;  // suffix_block_max[i] = max(blocks[i..end].block_max_value)
+            uint32_t current_entry_idx; // cursor position in the arrays
+            ndd::idInt current_doc_id;  // doc_id at cursor, or EXHAUSTED_DOC_ID
 
-            BlockIterator(uint32_t tid,
-                            float weight,
-                            const std::vector<BlockIdx>* blks,
-                            BMWIndex* idx,
-                            MDBX_txn* t) :
-                term_id(tid),
-                term_weight(weight),
-                blocks(blks),
-                first_block_idx(0),
-                current_block_idx(0),
-                global_term_max(0.0f),
-                current_entry_idx(0),
-                current_doc_id(std::numeric_limits<ndd::idInt>::max()),
-                current_score(0.0f),
-                index(idx),
-                txn(t) {
-                if(blocks && !blocks->empty()) {
-                    if(blocks->front().start_doc_id == BMWIndex::GLOBAL_MAX_SENTINEL_DOC_ID) {
-                        first_block_idx = 1;
-                        global_term_max = blocks->front().block_max_value;
-                    } else {
-                        first_block_idx = 0;
-                        for(const auto& block : *blocks) {
-                            global_term_max = std::max(global_term_max, block.block_max_value);
-                        }
-                    }
+            // Set up the iterator from a PostingListView and advance to
+            // the first live (non-tombstoned) entry.
+            void init(const PostingListView& view) {
+                doc_ids = view.doc_ids;
+                values_ptr = view.values;
+                data_size = view.count;
+                value_bits = view.value_bits;
+                max_value = view.max_value;
+                current_entry_idx = 0;
 
-                    current_block_idx = first_block_idx;
-                    if(current_block_idx < blocks->size()) {
-                        loadCurrentBlock();
-                    }
-                    {
-                        suffix_block_max.resize(blocks->size(), 0.0f);
-                        float running = 0.0f;
-                        for(size_t i = blocks->size(); i > first_block_idx; --i) {
-                           size_t idx = i - 1;
-                            running = std::max(running, (*blocks)[idx].block_max_value);
-                            suffix_block_max[idx] = running;
-                        }
-                    }
-
-                }
-            }
-
-            void loadCurrentBlock() {
-                if(current_block_idx >= blocks->size()) {
-                    current_doc_id = std::numeric_limits<ndd::idInt>::max();
+                if (data_size == 0 || doc_ids == nullptr) {
+                    current_doc_id = EXHAUSTED_DOC_ID;
                     return;
                 }
-                const auto& block_meta = (*blocks)[current_block_idx];
-                auto view = index->getReadOnlyBlock(txn, term_id, block_meta.start_doc_id);
-                doc_diffs_ptr = view.doc_diffs;
-                values_ptr = view.values;
-                block_data_size = view.count;
-                diff_bits = view.diff_bits;
-                value_bits = view.value_bits;
-                current_entry_idx = 0;
+
                 advanceToNextLive();
             }
 
-            inline float valueAt(size_t idx, float block_max_value) const {
-                if(value_bits == 32) {
-                    return static_cast<const float*>(values_ptr)[idx];
+            inline float valueAt(uint32_t idx) const {
+                if (value_bits == 32) {
+                    return ((const float*)values_ptr)[idx];
                 }
-                return dequantize(static_cast<const uint8_t*>(values_ptr)[idx], block_max_value);
+                return dequantize(((const uint8_t*)values_ptr)[idx], max_value);
             }
 
-            inline bool isLiveAt(size_t idx) const {
-                if(value_bits == 32) {
-                    return static_cast<const float*>(values_ptr)[idx] > 0.0f;
+            inline bool isLiveAt(uint32_t idx) const {
+                if (value_bits == 32) {
+                    return ((const float*)values_ptr)[idx] > 0.0f;
                 }
-                return static_cast<const uint8_t*>(values_ptr)[idx] > 0;
+                return ((const uint8_t*)values_ptr)[idx] > 0;
             }
 
-            inline size_t findNextLive(size_t start_idx) const {
-                if(value_bits == 32) {
-                    size_t idx = start_idx;
-                    auto values = static_cast<const float*>(values_ptr);
-                    while(idx < block_data_size && values[idx] <= 0.0f) {
-                        ++idx;
+            inline float currentValue() const {
+                return valueAt(current_entry_idx);
+            }
+
+            // Skip tombstoned entries starting at current_entry_idx.
+            // Updates current_doc_id to the next live doc, or EXHAUSTED_DOC_ID.
+            void advanceToNextLive() {
+                if (value_bits == 32) {
+                    const float* vals = (const float*)values_ptr;
+                    while (current_entry_idx < data_size && vals[current_entry_idx] <= 0.0f) {
+                        current_entry_idx++;
                     }
-                    return idx;
-                }
-                return index->findNextLiveSIMD(
-                        static_cast<const uint8_t*>(values_ptr), block_data_size, start_idx);
-            }
-
-            inline void advanceToNextLive() {
-                // Branch prediction will handle diff_bits effectively (constant per block)
-                if(diff_bits == 16) {
-                    advanceToNextLive16();
                 } else {
-                    advanceToNextLive32();
+                    current_entry_idx = (uint32_t)index->findNextLiveSIMD(
+                        (const uint8_t*)values_ptr,
+                        data_size,
+                        current_entry_idx);
+                }
+
+                if (current_entry_idx >= data_size) {
+                    current_doc_id = EXHAUSTED_DOC_ID;
+                } else {
+                    current_doc_id = doc_ids[current_entry_idx];
                 }
             }
 
-            inline void advanceToNextLive16() {
-                auto diff_ptr = static_cast<const uint16_t*>(doc_diffs_ptr);
-
-                // Fast path: check if current entry is already live
-                if(current_entry_idx < block_data_size && isLiveAt(current_entry_idx)) {
-                    const auto& block_meta = (*blocks)[current_block_idx];
-                    current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                    current_score = valueAt(current_entry_idx, block_meta.block_max_value);
-                    return;
-                }
-
-                current_entry_idx = findNextLive(current_entry_idx);
-
-                if(current_entry_idx < block_data_size) {
-                    const auto& block_meta = (*blocks)[current_block_idx];
-                    current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                        current_score = valueAt(current_entry_idx, block_meta.block_max_value);
-                    return;
-                }
-                // Block exhausted
-                current_block_idx++;
-                loadCurrentBlock();
-            }
-
-            inline void advanceToNextLive32() {
-                if(current_entry_idx < block_data_size && isLiveAt(current_entry_idx)) {
-                    const auto& block_meta = (*blocks)[current_block_idx];
-                    if(diff_bits == 32) {
-                        auto diff_ptr = static_cast<const uint32_t*>(doc_diffs_ptr);
-                        current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                    }
-                    else {
-                        current_doc_id = std::numeric_limits<ndd::idInt>::max();
-                        current_block_idx = blocks->size();
-                        return;
-                    }
-                    current_score = valueAt(current_entry_idx, block_meta.block_max_value);
-                    return;
-                }
-
-                current_entry_idx = findNextLive(current_entry_idx);
-
-                if(current_entry_idx < block_data_size) {
-                    const auto& block_meta = (*blocks)[current_block_idx];
-                    if(diff_bits == 32) {
-                        auto diff_ptr = static_cast<const uint32_t*>(doc_diffs_ptr);
-                        current_doc_id = block_meta.start_doc_id + diff_ptr[current_entry_idx];
-                    }
-                    else {
-                        current_doc_id = std::numeric_limits<ndd::idInt>::max();
-                        current_block_idx = blocks->size();
-                        return;
-                    }
-                        current_score = valueAt(current_entry_idx, block_meta.block_max_value);
-                    return;
-                }
-                current_block_idx++;
-                loadCurrentBlock();
-            }
-
-            inline void next() {
+            // Move to the next live entry after the current one.
+            void next() {
                 current_entry_idx++;
-                // Inline the check to avoid function call overhead in tight loops
-                if(diff_bits == 16) {
-                    advanceToNextLive16();
-                } else {
-                    advanceToNextLive32();
-                }
+                advanceToNextLive();
             }
 
+            // Skip forward to the first live entry with doc_id >= target.
+            // Uses SIMD binary search over the sorted doc_id array.
             void advance(ndd::idInt target_doc_id) {
-                if(current_doc_id >= target_doc_id) {
+                if (current_doc_id >= target_doc_id) {
                     return;
                 }
 
-                // Dispatch to specialized implementation
-                if(diff_bits == 16) {
-                    advance16(target_doc_id);
-                } else {
-                    advanceGeneric(target_doc_id);
-                }
+                current_entry_idx = (uint32_t)index->findDocIdSIMD(
+                    doc_ids, data_size, current_entry_idx, target_doc_id);
+
+                advanceToNextLive();
             }
 
-            // Specialized advance for 16-bit
-            void advance16(ndd::idInt target_doc_id) {
-                // Optimize Block Skipping logic (Same as before)
-                if(current_block_idx < blocks->size()) {
-                    if(current_block_idx + 1 < blocks->size()
-                       && (*blocks)[current_block_idx + 1].start_doc_id < target_doc_id) {
-                        auto it = std::upper_bound(blocks->begin() + current_block_idx,
-                                                   blocks->end(),
-                                                   target_doc_id,
-                                                   [](ndd::idInt id, const BlockIdx& b) {
-                                                       return id < b.start_doc_id;
-                                                   });
-                        size_t next_idx = std::distance(blocks->begin(), it);
-                        if(next_idx > 0) {
-                            current_block_idx = next_idx - 1;
-                            // Reset state for new block
-                            current_entry_idx = 0;
-                            doc_diffs_ptr = nullptr;
-                            block_data_size = 0;
-                            // DO NOT recursively call loadCurrentBlock -> advance(), just break to
-                            // reload below
-                        }
-                    }
-                }
-
-                if(block_data_size == 0) {
-                    loadCurrentBlock();
-                    // If diff_bits changed (unlikely but possible), dispatch again
-                    if(diff_bits != 16) {
-                        advance(target_doc_id);
-                        return;
-                    }
-                }
-
-                if(current_block_idx >= blocks->size()) {
-                    return;
-                }
-
-                const auto& block_meta = (*blocks)[current_block_idx];
-                if(target_doc_id > block_meta.start_doc_id) {
-                    ndd::idInt diff = target_doc_id - block_meta.start_doc_id;
-                    // If diff > UINT16_MAX, we know it's not in this 16-bit block
-                    if(diff > UINT16_MAX) {
-                        current_entry_idx = block_data_size;
-                    } else {
-                        current_entry_idx = index->findEntryIndexSIMD16(
-                                static_cast<const uint16_t*>(doc_diffs_ptr),
-                                block_data_size,
-                                current_entry_idx,
-                                static_cast<uint16_t>(diff));
-                    }
-                    advanceToNextLive16();
-                }
-            }
-
-            // Specialized advance for non-16-bit blocks (32-bit or Generic)
-            void advanceGeneric(ndd::idInt target_doc_id) {
-                // Optimize Block Skipping logic
-                if(current_block_idx < blocks->size()) {
-                    if(current_block_idx + 1 < blocks->size()
-                       && (*blocks)[current_block_idx + 1].start_doc_id < target_doc_id) {
-                        auto it = std::upper_bound(blocks->begin() + current_block_idx,
-                                                   blocks->end(),
-                                                   target_doc_id,
-                                                   [](ndd::idInt id, const BlockIdx& b) {
-                                                       return id < b.start_doc_id;
-                                                   });
-                        size_t next_idx = std::distance(blocks->begin(), it);
-                        if(next_idx > 0) {
-                            current_block_idx = next_idx - 1;
-                            current_entry_idx = 0;
-                            doc_diffs_ptr = nullptr;
-                            block_data_size = 0;
-                        }
-                    }
-                }
-
-                if(block_data_size == 0) {
-                    loadCurrentBlock();
-                    if(diff_bits == 16) {
-                        advance(target_doc_id);
-                        return;
-                    }
-                }
-
-                if(current_block_idx >= blocks->size()) {
-                    return;
-                }
-
-                const auto& block_meta = (*blocks)[current_block_idx];
-                if(target_doc_id > block_meta.start_doc_id) {
-                    ndd::idInt diff = target_doc_id - block_meta.start_doc_id;
-                    current_entry_idx =
-                            index->findEntryIndexSIMD32(static_cast<const uint32_t*>(doc_diffs_ptr),
-                                                        block_data_size,
-                                                        current_entry_idx,
-                                                        static_cast<uint32_t>(diff));
-                    advanceToNextLive32();
-                }
-            }
-
+            // Upper bound on the score any remaining entry can contribute.
+            // Used by the pruning step: if this is below the K-th best
+            // score, we can skip ahead safely.
             float upperBound() const {
-                if(current_block_idx >= blocks->size()) {
-                    return 0.0f;
-                }
-                return term_weight * (*blocks)[current_block_idx].block_max_value;
+                return global_max * term_weight;
             }
 
-            float globalUpperBound() const { return term_weight * global_term_max; }
-
-            // Upper bound on the weight of any element from current position to end of posting list.
-            /// Block-level approximation of Qdrant's per-element max_next_weight.
-            float maxRemainingWeight() const {
-                if(current_block_idx >= blocks->size()) {
-                    return 0.0f;
-                }
-                return suffix_block_max[current_block_idx];
-            }
-
-            /// Approximate remaining work (for finding longest iterator to prune).
-            size_t remainingBlocks() const {
-                if(current_block_idx >= blocks->size()) {
-                    return 0;
-                }
-                return blocks->size() - current_block_idx;
-            }
-
-            /// Iterate all live elements with doc_id <= target_id, calling f(doc_id, weight) for each.
-            /// After return, iterator is positioned at the first live element with doc_id > target_id
-            /// (or exhausted).
-            ///
-            /// This is the core batch-scoring primitive from Qdrant's algorithm.
-            /// Replaces the per-document advance/next pattern with a bulk scan.
-            template<typename F>
-            void for_each_till_id(ndd::idInt target_id, F&& f) {
-                // Fast exit: already past target or exhausted
-                if(current_doc_id > target_id) {
-                    return;
-                }
-                // current_doc_id == MAX is > any valid target_id, caught above
-
-                while(current_block_idx < blocks->size()) {
-                    const auto& bm = (*blocks)[current_block_idx];
-
-                    // If this block starts beyond target, all remaining entries are > target
-                    if(bm.start_doc_id > target_id) {
-                        // Iterator already positioned correctly by previous loadCurrentBlock
-                        return;
-                    }
-
-                    if(diff_bits == 16) {
-                        auto diffs = static_cast<const uint16_t*>(doc_diffs_ptr);
-                        // Tight inner loop: scan entries sequentially within block
-                        while(current_entry_idx < block_data_size) {
-                            ndd::idInt did = bm.start_doc_id + diffs[current_entry_idx];
-                            if(did > target_id) {
-                                // Reposition iterator state at this entry
-                                advanceToNextLive16();
-                                return;
-                            }
-                            if(isLiveAt(current_entry_idx)) {
-                                f(did, valueAt(current_entry_idx, bm.block_max_value));
-                            }
-                            current_entry_idx++;
-                        }
-                    } else {
-                        auto diffs = static_cast<const uint32_t*>(doc_diffs_ptr);
-                        while(current_entry_idx < block_data_size) {
-                            ndd::idInt did = bm.start_doc_id + diffs[current_entry_idx];
-                            if(did > target_id) {
-                                advanceToNextLive32();
-                                return;
-                            }
-                            if(isLiveAt(current_entry_idx)) {
-                                f(did, valueAt(current_entry_idx, bm.block_max_value));
-                            }
-                            current_entry_idx++;
-                        }
-                    }
-
-                    // Block exhausted, move to next
-                    current_block_idx++;
-                    if(current_block_idx < blocks->size()) {
-                        loadCurrentBlock();  // sets current_entry_idx=0, calls advanceToNextLive
-                    } else {
-                        current_doc_id = std::numeric_limits<ndd::idInt>::max();
-                        return;
-                    }
-                }
-                current_doc_id = std::numeric_limits<ndd::idInt>::max();
+            uint32_t remainingEntries() const {
+                if (current_doc_id == EXHAUSTED_DOC_ID) return 0;
+                return data_size - current_entry_idx;
             }
         };
 
-        MDBX_env* env_;
-        MDBX_dbi term_blocks_dbi_;
-        MDBX_dbi term_blocks_index_dbi_;
-        size_t vocab_size_;
-
-        // In-memory cache of term block indices
-        std::unordered_map<uint32_t, std::vector<BlockIdx>> term_blocks_index_;
-        mutable std::shared_mutex mutex_;
-
-        // Block management constants
-
-        // Optimized SIMD search for 16-bit diffs
-        size_t findEntryIndexSIMD16(const uint16_t* doc_diffs,
-                                    size_t size,
-                                    size_t start_idx,
-                                    uint16_t target_diff) {
-            size_t idx = start_idx;
-
-#if defined(USE_AVX512)
-            const size_t simd_width = 32;
-            __m512i target_vec = _mm512_set1_epi16(static_cast<short>(target_diff));
-
-            while(idx + simd_width <= size) {
-                __m512i data_vec = _mm512_loadu_si512(doc_diffs + idx);
-                __mmask32 mask = _mm512_cmpge_epi16_mask(data_vec, target_vec);
-
-                if(mask != 0) {
-                    return idx + __builtin_ctz(mask);
-                }
-                idx += simd_width;
-            }
-#elif defined(USE_AVX2)
-            const size_t simd_width = 16;
-            __m256i target_vec = _mm256_set1_epi16(static_cast<short>(target_diff));
-
-            while(idx + simd_width <= size) {
-                if(doc_diffs[idx + simd_width - 1] < target_diff) {
-                    idx += simd_width;
-                    continue;
-                }
-                __m256i data_vec =
-                        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(doc_diffs + idx));
-                __m256i offset = _mm256_set1_epi16(static_cast<short>(0x8000));
-                __m256i data_biased = _mm256_add_epi16(data_vec, offset);
-                __m256i target_biased = _mm256_add_epi16(target_vec, offset);
-
-                __m256i lt = _mm256_cmpgt_epi16(target_biased, data_biased);
-                int mask = _mm256_movemask_epi8(lt);
-
-                if(mask != -1) {
-                    return idx + (__builtin_ctz(~mask) / 2);
-                }
-                idx += simd_width;
-            }
-#elif defined(USE_SVE2)
-            svbool_t pg = svwhilelt_b16(idx, size);
-            svuint16_t target_vec = svdup_u16(target_diff);
-
-            while(svptest_any(svptrue_b16(), pg)) {
-                svuint16_t data_vec = svld1_u16(pg, doc_diffs + idx);
-                svbool_t cmp = svcmpge_u16(pg, data_vec, target_vec);
-
-                if(svptest_any(pg, cmp)) {
-                    svbool_t before_match = svbrkb_z(pg, cmp);
-                    uint64_t count = svcntp_b16(pg, before_match);
-                    return idx + count;
-                }
-                idx += svcnth();
-                pg = svwhilelt_b16(idx, size);
-            }
-            return idx;
-#elif defined(USE_NEON)
-            const size_t simd_width = 8;
-            uint16x8_t target_vec = vdupq_n_u16(target_diff);
-
-            while(idx + simd_width <= size) {
-                uint16x8_t data_vec = vld1q_u16(doc_diffs + idx);
-                uint16x8_t cmp = vcgeq_u16(data_vec, target_vec);
-
-                // Check if any element is >= target (result of vcgeq is all 1s if true)
-                if(vmaxvq_u16(cmp) != 0) {
-                    for(size_t i = 0; i < simd_width; ++i) {
-                        if(doc_diffs[idx + i] >= target_diff) {
-                            return idx + i;
-                        }
-                    }
-                }
-                idx += simd_width;
-            }
-#endif
-
-            // Scalar fallback
-            while(idx < size && doc_diffs[idx] < target_diff) {
-                idx++;
-            }
-            return idx;
-        }
-
-        // Optimized SIMD search for 32-bit diffs
-        size_t findEntryIndexSIMD32(const uint32_t* doc_diffs,
-                                    size_t size,
-                                    size_t start_idx,
-                                    uint32_t target_diff) {
+        /**
+         * =====================================================================
+         * SIMD helpers
+         * =====================================================================
+         *
+         * Find the first index >= start_idx where doc_ids[index] >= target.
+         * The doc_ids array is sorted, so this is a forward linear scan
+         * accelerated with SIMD: we compare a whole vector register of
+         * doc_ids against the target in one instruction.
+        */
+        size_t findDocIdSIMD(const uint32_t* doc_ids,
+                            size_t size,
+                            size_t start_idx,
+                            uint32_t target) const {
             size_t idx = start_idx;
 
 #if defined(USE_AVX512)
             const size_t simd_width = 16;
-            __m512i target_vec = _mm512_set1_epi32(static_cast<int>(target_diff));
+            __m512i target_vec = _mm512_set1_epi32((int)target);
 
-            while(idx + simd_width <= size) {
-                __m512i data_vec = _mm512_loadu_si512(doc_diffs + idx);
+            while (idx + simd_width <= size) {
+                __m512i data_vec = _mm512_loadu_si512(doc_ids + idx);
                 __mmask16 mask = _mm512_cmpge_epu32_mask(data_vec, target_vec);
 
-                if(mask != 0) {
+                if (mask != 0) {
                     return idx + __builtin_ctz(mask);
                 }
                 idx += simd_width;
             }
 #elif defined(USE_AVX2)
             const size_t simd_width = 8;
-            __m256i target_vec = _mm256_set1_epi32(static_cast<int>(target_diff));
+            __m256i target_vec = _mm256_set1_epi32((int)target);
 
-            while(idx + simd_width <= size) {
-                __builtin_prefetch(doc_diffs + idx + 32);
-                if(doc_diffs[idx + simd_width - 1] < target_diff) {
+            while (idx + simd_width <= size) {
+                __builtin_prefetch(doc_ids + idx + 32);
+
+                // Quick scalar check: if the last element in this chunk is
+                // still below target, skip the whole chunk without loading
+                // into a SIMD register.
+                if (doc_ids[idx + simd_width - 1] < target) {
                     idx += simd_width;
                     continue;
                 }
 
                 __m256i data_vec =
-                        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(doc_diffs + idx));
-                // unsigned comparison using max: a >= b iff max(a,b) == a
+                    _mm256_loadu_si256((const __m256i*)(doc_ids + idx));
+                // Unsigned >= via: max(a,b)==a  iff  a >= b
                 __m256i max_vec = _mm256_max_epu32(data_vec, target_vec);
                 __m256i cmp = _mm256_cmpeq_epi32(max_vec, data_vec);
 
                 int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
-                if(mask != 0) {
+                if (mask != 0) {
                     return idx + __builtin_ctz(mask);
                 }
                 idx += simd_width;
             }
 #elif defined(USE_SVE2)
             svbool_t pg = svwhilelt_b32(idx, size);
-            svuint32_t target_vec = svdup_u32(target_diff);
+            svuint32_t target_vec = svdup_u32(target);
 
-            while(svptest_any(svptrue_b32(), pg)) {
-                svuint32_t data_vec = svld1_u32(pg, doc_diffs + idx);
+            while (svptest_any(svptrue_b32(), pg)) {
+                svuint32_t data_vec = svld1_u32(pg, doc_ids + idx);
                 svbool_t cmp = svcmpge_u32(pg, data_vec, target_vec);
 
-                if(svptest_any(pg, cmp)) {
+                if (svptest_any(pg, cmp)) {
                     svbool_t before_match = svbrkb_z(pg, cmp);
                     uint64_t count = svcntp_b32(pg, before_match);
                     return idx + count;
@@ -1136,16 +629,15 @@ namespace ndd {
             return idx;
 #elif defined(USE_NEON)
             const size_t simd_width = 4;
-            uint32x4_t target_vec = vdupq_n_u32(target_diff);
+            uint32x4_t target_vec = vdupq_n_u32(target);
 
-            while(idx + simd_width <= size) {
-                uint32x4_t data_vec = vld1q_u32(doc_diffs + idx);
+            while (idx + simd_width <= size) {
+                uint32x4_t data_vec = vld1q_u32(doc_ids + idx);
                 uint32x4_t cmp = vcgeq_u32(data_vec, target_vec);
 
-                // Check if any bit is expected (vcgeq returns all 1s or 0s)
-                if(vmaxvq_u32(cmp) != 0) {
-                    for(size_t i = 0; i < simd_width; ++i) {
-                        if(doc_diffs[idx + i] >= target_diff) {
+                if (vmaxvq_u32(cmp) != 0) {
+                    for (size_t i = 0; i < simd_width; i++) {
+                        if (doc_ids[idx + i] >= target) {
                             return idx + i;
                         }
                     }
@@ -1154,38 +646,29 @@ namespace ndd {
             }
 #endif
 
-            // Scalar fallback
-            while(idx < size && doc_diffs[idx] < target_diff) {
+            // Scalar fallback for remaining elements
+            while (idx < size && doc_ids[idx] < target) {
                 idx++;
             }
             return idx;
         }
 
-        // size_t findEntryIndexGeneric(const void* doc_diffs,
-        //                              size_t size,
-        //                              size_t start_idx,
-        //                              ndd::idInt target_diff,
-        //                              uint8_t bits) {
-        //     // In 32-bit mode, we only expect 32-bit blocks here (16-bit handled by SIMD16)
-        //     return findEntryIndexSIMD32(static_cast<const uint32_t*>(doc_diffs),
-        //                                 size,
-        //                                 start_idx,
-        //                                 static_cast<uint32_t>(target_diff));
-        // }
-
-        // Find next non-zero value (live entry)
-        size_t findNextLiveSIMD(const uint8_t* values, size_t size, size_t start_idx) {
+        /**
+         * Find the first non-zero byte in values[start_idx..size).
+         * Used to skip tombstoned entries (value==0) in quantized posting lists.
+         */
+        size_t findNextLiveSIMD(const uint8_t* values, size_t size, size_t start_idx) const {
             size_t idx = start_idx;
 
 #if defined(USE_AVX512)
             const size_t simd_width = 64;
             __m512i zero_vec = _mm512_setzero_si512();
 
-            while(idx + simd_width <= size) {
+            while (idx + simd_width <= size) {
                 __m512i data_vec = _mm512_loadu_si512(values + idx);
                 __mmask64 mask = _mm512_cmpneq_epu8_mask(data_vec, zero_vec);
 
-                if(mask != 0) {
+                if (mask != 0) {
                     return idx + __builtin_ctzll(mask);
                 }
                 idx += simd_width;
@@ -1194,15 +677,13 @@ namespace ndd {
             const size_t simd_width = 32;
             __m256i zero_vec = _mm256_setzero_si256();
 
-            while(idx + simd_width <= size) {
+            while (idx + simd_width <= size) {
                 __m256i data_vec =
-                        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(values + idx));
+                    _mm256_loadu_si256((const __m256i*)(values + idx));
                 __m256i cmp = _mm256_cmpeq_epi8(data_vec, zero_vec);
-                int mask = _mm256_movemask_epi8(cmp);  // 1 = zero, 0 = non-zero
+                int mask = _mm256_movemask_epi8(cmp);
 
-                // If all 1s (mask 0xFFFFFFFF), then all zeros -> continue
-                if(static_cast<uint32_t>(mask) != 0xFFFFFFFF) {
-                    // ~mask has 1s where non-zero exists
+                if ((uint32_t)mask != 0xFFFFFFFF) {
                     return idx + __builtin_ctz(~mask);
                 }
                 idx += simd_width;
@@ -1211,16 +692,13 @@ namespace ndd {
             const size_t simd_width = 16;
             uint8x16_t zero_vec = vdupq_n_u8(0);
 
-            while(idx + simd_width <= size) {
+            while (idx + simd_width <= size) {
                 uint8x16_t data_vec = vld1q_u8(values + idx);
                 uint8x16_t cmp = vceqq_u8(data_vec, zero_vec);
 
-                // Check if any element is NOT zero (cmp is 0x00 for non-zero, 0xFF for zero)
-                // If all are zero, cmp is all 0xFF. vminvq_u8 will be 0xFF.
-                // If any is non-zero, cmp has a 0x00. vminvq_u8 will be 0x00.
-                if(vminvq_u8(cmp) == 0) {
-                    for(size_t i = 0; i < simd_width; ++i) {
-                        if(values[idx + i] != 0) {
+                if (vminvq_u8(cmp) == 0) {
+                    for (size_t i = 0; i < simd_width; i++) {
+                        if (values[idx + i] != 0) {
                             return idx + i;
                         }
                     }
@@ -1229,11 +707,11 @@ namespace ndd {
             }
 #elif defined(USE_SVE2)
             svbool_t pg = svwhilelt_b8(idx, size);
-            while(svptest_any(svptrue_b8(), pg)) {
+            while (svptest_any(svptrue_b8(), pg)) {
                 svuint8_t data_vec = svld1_u8(pg, values + idx);
-                svbool_t cmp = svcmpne_n_u8(pg, data_vec, 0);  // Not equal to 0
+                svbool_t cmp = svcmpne_n_u8(pg, data_vec, 0);
 
-                if(svptest_any(pg, cmp)) {
+                if (svptest_any(pg, cmp)) {
                     svbool_t before_match = svbrkb_z(pg, cmp);
                     return idx + svcntp_b8(pg, before_match);
                 }
@@ -1243,52 +721,236 @@ namespace ndd {
             return idx;
 #endif
 
-            while(idx < size) {
-                if(values[idx] != 0) {
-                    return idx;
-                }
+            // Scalar fallback
+            while (idx < size) {
+                if (values[idx] != 0) return idx;
                 idx++;
             }
             return idx;
         }
 
-        bool loadTermBlocksIndex() {
+        /**
+         * =====================================================================
+         * MDBX storage methods
+         * =====================================================================
+         *
+         * Return a zero-copy view of a term's posting list.
+         * The returned pointers are valid for the lifetime of `txn`.
+        */
+        PostingListView getReadOnlyPostingList(MDBX_txn* txn, uint32_t term_id) const {
+            MDBX_val key;
+            uint32_t tid = term_id;
+            key.iov_base = &tid;
+            key.iov_len = sizeof(uint32_t);
+
+            MDBX_val data;
+            int rc = mdbx_get(txn, term_postings_dbi_, &key, &data);
+
+            if (rc == MDBX_SUCCESS && data.iov_len >= sizeof(PostingListHeader)) {
+                const PostingListHeader* header = (const PostingListHeader*)data.iov_base;
+
+                if (header->version != 5) {
+                    LOG_ERROR("Unsupported posting list version: " << (int)header->version);
+                    return {nullptr, nullptr, 0, 0, 0.0f};
+                }
+
+                uint32_t n = header->n;
+                const uint8_t* ptr =
+                    (const uint8_t*)data.iov_base + sizeof(PostingListHeader);
+                const uint32_t* doc_ids = (const uint32_t*)ptr;
+
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+                uint8_t vbits = 32;
+                const void* values = ptr + n * sizeof(uint32_t);
+                size_t required = sizeof(PostingListHeader)
+                                  + n * sizeof(uint32_t) + n * sizeof(float);
+#else
+                uint8_t vbits = 8;
+                const void* values = ptr + n * sizeof(uint32_t);
+                size_t required = sizeof(PostingListHeader)
+                                  + n * sizeof(uint32_t) + n * sizeof(uint8_t);
+#endif
+
+                if (data.iov_len < required) {
+                    return {nullptr, nullptr, 0, 0, 0.0f};
+                }
+
+                return {doc_ids, values, n, vbits, header->max_value};
+            }
+
+            return {nullptr, nullptr, 0, 0, 0.0f};
+        }
+
+        
+        //Deserialize a posting list into an in-memory vector of entries
+        std::vector<PostingListEntry> loadPostingList(MDBX_txn* txn, uint32_t term_id) const {
+            MDBX_val key;
+            uint32_t tid = term_id;
+            key.iov_base = &tid;
+            key.iov_len = sizeof(uint32_t);
+
+            MDBX_val data;
+            int rc = mdbx_get(txn, term_postings_dbi_, &key, &data);
+
+            std::vector<PostingListEntry> entries;
+            if (rc != MDBX_SUCCESS || data.iov_len < sizeof(PostingListHeader)) {
+                return entries;
+            }
+
+            const PostingListHeader* header = (const PostingListHeader*)data.iov_base;
+            if (header->version != 5) {
+                LOG_ERROR("Unsupported posting list version: " << (int)header->version);
+                return entries;
+            }
+
+            uint32_t n = header->n;
+            entries.resize(n);
+
+            const uint8_t* ptr =
+                (const uint8_t*)data.iov_base + sizeof(PostingListHeader);
+            const uint32_t* doc_ids = (const uint32_t*)ptr;
+
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+            const float* vals = (const float*)(ptr + n * sizeof(uint32_t));
+            for (uint32_t i = 0; i < n; i++) {
+                entries[i].doc_id = doc_ids[i];
+                entries[i].value = vals[i];
+            }
+#else
+            const uint8_t* vals = ptr + n * sizeof(uint32_t);
+            for (uint32_t i = 0; i < n; i++) {
+                entries[i].doc_id = doc_ids[i];
+                entries[i].value = dequantize(vals[i], header->max_value);
+            }
+#endif
+
+            return entries;
+        }
+
+        /**
+         * 1. Serialize entries and write them to MDBX.
+         * 2. Update the in-memory term_info_ cache with the new max value.
+         */
+        bool savePostingList(MDBX_txn* txn,
+                             uint32_t term_id,
+                             const std::vector<PostingListEntry>& entries) {
+            MDBX_val key;
+            uint32_t tid = term_id;
+            key.iov_base = &tid;
+            key.iov_len = sizeof(uint32_t);
+
+            uint32_t n = (uint32_t)entries.size();
+
+            float max_val = 0.0f;
+            uint32_t live = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                if (entries[i].value > max_val) {
+                    max_val = entries[i].value;
+                }
+                if (entries[i].value > 1e-9f) {
+                    live++;
+                }
+            }
+
+            PostingListHeader header;
+            header.version = 5;
+            header.n = n;
+            header.live_count = live;
+            header.max_value = max_val;
+
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+            size_t value_size = sizeof(float);
+#else
+            size_t value_size = sizeof(uint8_t);
+#endif
+
+            size_t total_size = sizeof(PostingListHeader)
+                                + n * sizeof(uint32_t) + n * value_size;
+
+            std::vector<uint8_t> buffer(total_size);
+            std::memcpy(buffer.data(), &header, sizeof(PostingListHeader));
+
+            uint8_t* ptr = buffer.data() + sizeof(PostingListHeader);
+
+            uint32_t* doc_ids_out = (uint32_t*)ptr;
+            for (uint32_t i = 0; i < n; i++) {
+                doc_ids_out[i] = entries[i].doc_id;
+            }
+            ptr += n * sizeof(uint32_t);
+
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+            float* vals_out = (float*)ptr;
+            for (uint32_t i = 0; i < n; i++) {
+                vals_out[i] = entries[i].value;
+            }
+#else
+            uint8_t* vals_out = ptr;
+            for (uint32_t i = 0; i < n; i++) {
+                vals_out[i] = quantize(entries[i].value, max_val);
+            }
+#endif
+
+            MDBX_val data;
+            data.iov_base = buffer.data();
+            data.iov_len = buffer.size();
+
+            int rc = mdbx_put(txn, term_postings_dbi_, &key, &data, MDBX_UPSERT);
+            if (rc != 0) {
+                LOG_ERROR("Failed to save posting list for term "
+                        << term_id << ": " << mdbx_strerror(rc));
+                return false;
+            }
+
+            term_info_[term_id] = max_val;
+            return true;
+        }
+
+        bool deletePostingList(MDBX_txn* txn, uint32_t term_id) {
+            MDBX_val key;
+            uint32_t tid = term_id;
+            key.iov_base = &tid;
+            key.iov_len = sizeof(uint32_t);
+
+            int rc = mdbx_del(txn, term_postings_dbi_, &key, nullptr);
+            if (rc == MDBX_SUCCESS || rc == MDBX_NOTFOUND) {
+                term_info_.erase(term_id);
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * =====================================================================
+         * Startup: populate term_info_ from stored posting list headers
+         * =====================================================================
+         */
+        bool loadTermInfo() {
             MDBX_txn* txn;
             int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
-            if(rc != 0) {
-                LOG_ERROR("Failed to begin transaction for loading index: " << mdbx_strerror(rc));
+            if (rc != 0) {
+                LOG_ERROR("Failed to begin transaction for loading term info: "
+                            << mdbx_strerror(rc));
                 return false;
             }
 
             MDBX_cursor* cursor;
-            rc = mdbx_cursor_open(txn, term_blocks_index_dbi_, &cursor);
-            if(rc != 0) {
+            rc = mdbx_cursor_open(txn, term_postings_dbi_, &cursor);
+            if (rc != 0) {
                 mdbx_txn_abort(txn);
                 return false;
             }
 
             MDBX_val key, data;
             rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
-            while(rc == MDBX_SUCCESS) {
-                if(key.iov_len == sizeof(uint32_t)) {
+            while (rc == MDBX_SUCCESS) {
+                if (key.iov_len == sizeof(uint32_t)
+                    && data.iov_len >= sizeof(PostingListHeader)) {
                     uint32_t term_id;
                     std::memcpy(&term_id, key.iov_base, sizeof(uint32_t));
 
-                    size_t count = data.iov_len / sizeof(BlockIdx);
-                    std::vector<BlockIdx> blocks(count);
-                    std::memcpy(blocks.data(), data.iov_base, data.iov_len);
-
-                    if(!blocks.empty()
-                       && blocks.front().start_doc_id != GLOBAL_MAX_SENTINEL_DOC_ID) {
-                        float global_max = 0.0f;
-                        for(const auto& b : blocks) {
-                            global_max = std::max(global_max, b.block_max_value);
-                        }
-                        blocks.insert(
-                                blocks.begin(), BlockIdx(GLOBAL_MAX_SENTINEL_DOC_ID, global_max));
-                    }
-
-                    term_blocks_index_[term_id] = std::move(blocks);
+                    const PostingListHeader* header =
+                        (const PostingListHeader*)data.iov_base;
+                    term_info_[term_id] = header->max_value;
                 }
                 rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
             }
@@ -1298,18 +960,72 @@ namespace ndd {
             return true;
         }
 
-        bool removeDocumentInternal(MDBX_txn* txn, ndd::idInt doc_id, const SparseVector& vec) {
-            std::unordered_set<uint32_t> touched_terms;
-            for(size_t i = 0; i < vec.indices.size(); ++i) {
-                uint32_t term_id = vec.indices[i];
-                touched_terms.insert(term_id);
-                if(!removeFromBlock(txn, term_id, doc_id)) {
-                    // Ignore errors
+        /**
+         * =====================================================================
+         * Add / remove document internals
+         * =====================================================================
+        */
+
+        /**
+         * Add a new batch of documents.
+         * For each term in the documents:
+         * 1. Load the existing posting list
+         * 2. Merge in the new sorted entries
+         * 3. write it back to disk
+         */
+        bool addDocumentsBatchInternal(MDBX_txn* txn,
+                const std::vector<std::pair<ndd::idInt, SparseVector>>& docs)
+        {
+            std::unordered_map<uint32_t, std::vector<std::pair<ndd::idInt, float>>> term_updates;
+
+            for (size_t d = 0; d < docs.size(); d++) {
+                ndd::idInt doc_id = docs[d].first;
+                const SparseVector& vec = docs[d].second;
+                for (size_t i = 0; i < vec.indices.size(); i++) {
+                    term_updates[vec.indices[i]].push_back(
+                        std::make_pair(doc_id, vec.values[i]));
                 }
             }
 
-            for(uint32_t term_id : touched_terms) {
-                if(!saveTermIndex(txn, term_id)) {
+            for (auto it = term_updates.begin(); it != term_updates.end(); ++it) {
+                uint32_t term_id = it->first;
+                std::vector<std::pair<ndd::idInt, float>>& updates = it->second;
+
+                std::sort(updates.begin(), updates.end());
+
+                std::vector<PostingListEntry> existing = loadPostingList(txn, term_id);
+
+                std::vector<PostingListEntry> merged;
+                merged.reserve(existing.size() + updates.size());
+
+                size_t ei = 0;
+                size_t ui = 0;
+                while (ei < existing.size() && ui < updates.size()) {
+                    ndd::idInt existing_id = existing[ei].doc_id;
+                    ndd::idInt update_id = updates[ui].first;
+                    if (existing_id < update_id) {
+                        merged.push_back(existing[ei]);
+                        ei++;
+                    } else if (existing_id > update_id) {
+                        merged.push_back(PostingListEntry(update_id, updates[ui].second));
+                        ui++;
+                    } else {
+                        merged.push_back(PostingListEntry(update_id, updates[ui].second));
+                        ei++;
+                        ui++;
+                    }
+                }
+                while (ei < existing.size()) {
+                    merged.push_back(existing[ei]);
+                    ei++;
+                }
+                while (ui < updates.size()) {
+                    merged.push_back(PostingListEntry(updates[ui].first, updates[ui].second));
+                    ui++;
+                }
+
+                if (!savePostingList(txn, term_id, merged)) {
+                    LOG_ERROR("Failed to save posting list for term " << term_id);
                     return false;
                 }
             }
@@ -1317,609 +1033,127 @@ namespace ndd {
             return true;
         }
 
-        bool
-        addDocumentsBatchInternal(MDBX_txn* txn,
-                                  const std::vector<std::pair<ndd::idInt, SparseVector>>& docs) {
-            // Group updates by term_id
-            std::unordered_map<uint32_t, std::vector<std::pair<ndd::idInt, float>>> term_updates;
-            for(const auto& [doc_id, sparse_vec] : docs) {
-                for(size_t i = 0; i < sparse_vec.indices.size(); ++i) {
-                    term_updates[sparse_vec.indices[i]].emplace_back(doc_id, sparse_vec.values[i]);
+        // Remove a document by tombstoning its entries (setting weight to 0).
+        // Every 8th deletion triggers compaction which physically removes
+        // all tombstones from the list.
+        /**
+         * Remove a document by tombstoning its entries (setting weight to 0).
+         */
+        bool removeDocumentInternal(MDBX_txn* txn, ndd::idInt doc_id,
+                                    const SparseVector& vec) {
+            for (size_t i = 0; i < vec.indices.size(); i++) {
+                uint32_t term_id = vec.indices[i];
+
+                std::vector<PostingListEntry> entries = loadPostingList(txn, term_id);
+                if (entries.empty()) continue;
+
+                // Binary search for the doc_id in the sorted list.
+                size_t lo = 0;
+                size_t hi = entries.size();
+                while (lo < hi) {
+                    size_t mid = lo + (hi - lo) / 2;
+                    if (entries[mid].doc_id < doc_id) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
                 }
-            }
 
-            // Process each term
-            for(auto& [term_id, updates] : term_updates) {
-                // Sort by doc_id to access blocks sequentially
-                std::sort(updates.begin(), updates.end());
+                if (lo < entries.size() && entries[lo].doc_id == doc_id) {
+                    entries[lo].value = 0.0f;  // tombstone
 
-                for(const auto& [doc_id, value] : updates) {
-                    if(!addToBlock(txn, term_id, doc_id, value)) {
-                        LOG_ERROR("Failed to add doc " << doc_id << " term " << term_id
-                                                       << " to block");
+
+                    /**
+                     * Periodic compaction: physically remove all tombstones.
+                     * XXX: TODO: the periodic compaction work should be more robust.
+                     * It cannot be based on doc_id % 8 and has be to be configurable.
+                    */
+                    if ((doc_id % 8) == 0) {
+                        size_t write = 0;
+                        for (size_t j = 0; j < entries.size(); j++) {
+                            if (entries[j].value > 0.0f) {
+                                entries[write++] = entries[j];
+                            }
+                        }
+                        entries.resize(write);
+
+                        if (entries.empty()) {
+                            deletePostingList(txn, term_id);
+                            continue;
+                        }
+                    }
+
+                    if (!savePostingList(txn, term_id, entries)) {
                         return false;
                     }
                 }
-
-                // Save index structure for this term after all updates
-                if(!saveTermIndex(txn, term_id)) {
-                    return false;
-                }
             }
-            return true;
-        }
-
-        // Save the index structure (block list) for a single term
-        bool saveTermIndex(MDBX_txn* txn, uint32_t term_id) {
-            auto it = term_blocks_index_.find(term_id);
-            MDBX_val key;
-            key.iov_base = const_cast<void*>(static_cast<const void*>(&term_id));
-            key.iov_len = sizeof(uint32_t);
-
-            if(it == term_blocks_index_.end() || it->second.empty()) {
-                int rc = mdbx_del(txn, term_blocks_index_dbi_, &key, nullptr);
-                return rc == MDBX_SUCCESS || rc == MDBX_NOTFOUND;
-            }
-
-            auto& blocks = it->second;
-            size_t first_idx = firstRealBlockIndex(blocks);
-            if(first_idx >= blocks.size()) {
-                term_blocks_index_.erase(it);
-                int rc = mdbx_del(txn, term_blocks_index_dbi_, &key, nullptr);
-                return rc == MDBX_SUCCESS || rc == MDBX_NOTFOUND;
-            }
-
-            float global_max = 0.0f;
-            for(size_t i = first_idx; i < blocks.size(); ++i) {
-                global_max = std::max(global_max, blocks[i].block_max_value);
-            }
-
-            if(first_idx == 0) {
-                blocks.insert(blocks.begin(), BlockIdx(GLOBAL_MAX_SENTINEL_DOC_ID, global_max));
-            } else {
-                blocks[0].block_max_value = global_max;
-            }
-
-            MDBX_val data;
-
-            data.iov_base = const_cast<void*>(static_cast<const void*>(blocks.data()));
-            data.iov_len = blocks.size() * sizeof(BlockIdx);
-
-            int rc = mdbx_put(txn, term_blocks_index_dbi_, &key, &data, MDBX_UPSERT);
-            if(rc != 0) {
-                LOG_ERROR("Failed to save term index for term " << term_id << ": "
-                                                                << mdbx_strerror(rc));
-                return false;
-            }
-            return true;
-        }
-
-        std::vector<BlockEntry>
-        loadBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt start_doc_id) {
-            // Zero-copy key creation
-            struct {
-                uint32_t t;
-                ndd::idInt d;
-            } __attribute__((packed)) key_struct;
-            key_struct.t = term_id;
-            key_struct.d = start_doc_id;
-
-            MDBX_val key;
-            key.iov_base = &key_struct;
-            key.iov_len = sizeof(key_struct);
-
-            MDBX_val data;
-            int rc = mdbx_get(txn, term_blocks_dbi_, &key, &data);
-
-            std::vector<BlockEntry> entries;
-            if(rc == MDBX_SUCCESS && data.iov_len >= sizeof(BlockHeader)) {
-                const BlockHeader* header = reinterpret_cast<const BlockHeader*>(data.iov_base);
-                size_t n = header->n;
-
-                entries.resize(n);
-                const uint8_t* ptr =
-                        static_cast<const uint8_t*>(data.iov_base) + sizeof(BlockHeader);
-
-                if(header->version == 3) {
-                    // Determine pointer locations based on diff_bits
-                    const void* diff_ptr = ptr;
-                    const uint8_t* val_ptr;
-
-                    if(header->diff_bits == 16) {
-                        val_ptr = ptr + n * sizeof(uint16_t);
-                        const uint16_t* diffs = static_cast<const uint16_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = dequantize(val_ptr[i], header->block_max_value);
-                        }
-                    } else if(header->diff_bits == 32) {
-                        val_ptr = ptr + n * sizeof(uint32_t);
-                        const uint32_t* diffs = static_cast<const uint32_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = dequantize(val_ptr[i], header->block_max_value);
-                        }
-                    }
-                    else {
-                        LOG_ERROR("Unsupported block diff_bits: " << (int)header->diff_bits);
-                    }
-                } else if(header->version == 4) {
-                    const void* diff_ptr = ptr;
-                    const float* val_ptr;
-
-                    if(header->diff_bits == 16) {
-                        // val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint16_t));
-                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint16_t) + header->alignment_pad);
-                        const uint16_t* diffs = static_cast<const uint16_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = val_ptr[i];
-                        }
-                    } else if(header->diff_bits == 32) {
-                        // val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint32_t));
-                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint32_t) + header->alignment_pad);
-                        const uint32_t* diffs = static_cast<const uint32_t*>(diff_ptr);
-                        for(size_t i = 0; i < n; ++i) {
-                            entries[i].doc_diff = diffs[i];
-                            entries[i].value = val_ptr[i];
-                        }
-                    }
-                    else {
-                        LOG_ERROR("Unsupported block diff_bits: " << (int)header->diff_bits);
-                    }
-                } else {
-                    LOG_ERROR("Unsupported block version: " << (int)header->version);
-                }
-            }
-            return entries;
-        }
-
-        bool saveBlock(MDBX_txn* txn,
-                       uint32_t term_id,
-                       ndd::idInt start_doc_id,
-                       const std::vector<BlockEntry>& entries,
-                       BlockHeader& header) {
-            // Zero-copy key creation
-            struct {
-                uint32_t t;
-                ndd::idInt d;
-            } __attribute__((packed)) key_struct;
-            key_struct.t = term_id;
-            key_struct.d = start_doc_id;
-
-            MDBX_val key;
-            key.iov_base = &key_struct;
-            key.iov_len = sizeof(key_struct);
-
-            size_t n = entries.size();
-
-            // Recalculate stats
-            float max_val = 0.0f;
-            ndd::idInt max_diff = 0;
-            size_t live = 0;
-
-            for(const auto& e : entries) {
-                if(e.value > max_val) {
-                    max_val = e.value;
-                }
-                if(e.doc_diff > max_diff) {
-                    max_diff = e.doc_diff;
-                }
-                if(e.value > 1e-9f) {
-                    live++;  // Approximate check for float > 0
-                }
-            }
-
-            header.block_max_value = max_val;
-            header.live_count = static_cast<uint16_t>(live);
-            header.n = static_cast<uint16_t>(n);
-            
-#if defined(NDD_BMW_STORE_FLOAT_VALUES)
-            header.version = 4;
-#else
-            header.version = 3;
-#endif
-            header.alignment_pad = 0;
-
-            if(max_diff <= UINT16_MAX) {
-                header.diff_bits = 16;
-            } else {
-                header.diff_bits = 32;
-            }
-
-            size_t diff_size = header.diff_bits / 8;
-#if defined(NDD_BMW_STORE_FLOAT_VALUES)
-            size_t value_size = sizeof(float);
-#else
-            size_t value_size = sizeof(uint8_t);
-#endif
-            // size_t total_size = sizeof(BlockHeader) + (n * diff_size) + (n * value_size);
-            size_t offset = sizeof(BlockHeader) + (n * diff_size);
-            size_t pad = 0;
-#if defined(NDD_BMW_STORE_FLOAT_VALUES)
-            pad = (4 - (offset & 3)) & 3;
-            header.alignment_pad = static_cast<uint32_t>(pad);
-#endif //NDD_BMW_STORE_FLOAT_VALUES
-
-            size_t total_size = offset + pad + (n * value_size);
-
-            std::vector<uint8_t> buffer(total_size);
-
-            // Copy header
-            std::memcpy(buffer.data(), &header, sizeof(BlockHeader));
-
-            uint8_t* ptr = buffer.data() + sizeof(BlockHeader);
-
-            // Copy doc_diffs
-            if(header.diff_bits == 16) {
-                uint16_t* diffs = reinterpret_cast<uint16_t*>(ptr);
-                for(size_t i = 0; i < n; ++i) {
-                    diffs[i] = static_cast<uint16_t>(entries[i].doc_diff);
-                }
-                ptr += n * sizeof(uint16_t);
-                ptr += header.alignment_pad;
-            } else if(header.diff_bits == 32) {
-                uint32_t* diffs = reinterpret_cast<uint32_t*>(ptr);
-                for(size_t i = 0; i < n; ++i) {
-                    diffs[i] = static_cast<uint32_t>(entries[i].doc_diff);
-                }
-                ptr += n * sizeof(uint32_t);
-                ptr += header.alignment_pad;
-            }
-
-            // Copy values
-#if defined(NDD_BMW_STORE_FLOAT_VALUES)
-            float* values = reinterpret_cast<float*>(ptr);
-            for(size_t i = 0; i < n; ++i) {
-                values[i] = entries[i].value;
-            }
-#else
-            uint8_t* values = static_cast<uint8_t*>(ptr);
-            for(size_t i = 0; i < n; ++i) {
-                values[i] = quantize(entries[i].value, max_val);
-            }
-#endif
-
-            MDBX_val data;
-            data.iov_base = buffer.data();
-            data.iov_len = buffer.size();
-
-            int rc = mdbx_put(txn, term_blocks_dbi_, &key, &data, MDBX_UPSERT);
-            return rc == 0;
-        }
-
-        bool deleteBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt start_doc_id) {
-            struct {
-                uint32_t t;
-                ndd::idInt d;
-            } __attribute__((packed)) key_struct;
-            key_struct.t = term_id;
-            key_struct.d = start_doc_id;
-
-            MDBX_val key;
-            key.iov_base = &key_struct;
-            key.iov_len = sizeof(key_struct);
-
-            int rc = mdbx_del(txn, term_blocks_dbi_, &key, nullptr);
-            return rc == MDBX_SUCCESS || rc == MDBX_NOTFOUND;
-        }
-
-        bool compactBlockAfterDelete(MDBX_txn* txn,
-                                     uint32_t term_id,
-                                     size_t block_idx,
-                                     const std::vector<BlockEntry>& entries_with_tombstones) {
-            auto term_it = term_blocks_index_.find(term_id);
-            if(term_it == term_blocks_index_.end()) {
-                return true;
-            }
-
-            auto& blocks = term_it->second;
-            if(block_idx >= blocks.size()) {
-                return true;
-            }
-
-            ndd::idInt old_start_doc_id = blocks[block_idx].start_doc_id;
-
-            std::vector<BlockEntry> live_entries;
-            live_entries.reserve(entries_with_tombstones.size());
-            for(const auto& entry : entries_with_tombstones) {
-                if(entry.value > 0.0f) {
-                    live_entries.push_back(entry);
-                }
-            }
-
-            if(live_entries.empty()) {
-                if(!deleteBlock(txn, term_id, old_start_doc_id)) {
-                    return false;
-                }
-
-                blocks.erase(blocks.begin() + static_cast<std::ptrdiff_t>(block_idx));
-                if(blocks.empty()) {
-                    term_blocks_index_.erase(term_it);
-                }
-                return true;
-            }
-
-            ndd::idInt start_shift = live_entries.front().doc_diff;
-            ndd::idInt new_start_doc_id = old_start_doc_id + start_shift;
-
-            if(start_shift != 0) {
-                for(auto& entry : live_entries) {
-                    entry.doc_diff -= start_shift;
-                }
-            }
-
-            BlockHeader header;
-            bool need_rekey = (new_start_doc_id != old_start_doc_id);
-
-            if(need_rekey) {
-                if(!deleteBlock(txn, term_id, old_start_doc_id)) {
-                    return false;
-                }
-            }
-
-            if(!saveBlock(txn, term_id, new_start_doc_id, live_entries, header)) {
-                return false;
-            }
-
-            blocks[block_idx].start_doc_id = new_start_doc_id;
-            blocks[block_idx].block_max_value = header.block_max_value;
 
             return true;
         }
 
-        // Returns pointer to block data valid for the duration of txn
-        BlockView getReadOnlyBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt start_doc_id) {
-            // Zero-copy key creation on stack
-            struct {
-                uint32_t t;
-                ndd::idInt d;
-            } __attribute__((packed)) key_struct;
-            key_struct.t = term_id;
-            key_struct.d = start_doc_id;
 
-            MDBX_val key;
-            key.iov_base = &key_struct;
-            key.iov_len = sizeof(key_struct);
+        /**
+         * =====================================================================
+         * Pruning
+         * =====================================================================
+         *
+         * After each batch, if we already have K results, we try to skip
+         * entries in the longest posting list that cannot contribute a
+         * score above the current K-th best.
+         *
+         * Idea: find the longest posting list (most remaining entries).
+         * All doc_ids between its current position and the next doc_id
+         * in any other list appear ONLY in this list. Their max possible
+         * score is global_max_weight * query_weight. If that's below
+         * the K-th best score, those docs can't make it into the results,
+         * so we skip ahead to where other lists resume.
+        */
+        void pruneLongest(std::vector<PostingListIterator*>& iters, float min_score) {
+            if (iters.size() < 2) return;
 
-            MDBX_val data;
-            int rc = mdbx_get(txn, term_blocks_dbi_, &key, &data);
-
-            if(rc == MDBX_SUCCESS && data.iov_len >= sizeof(BlockHeader)) {
-                const BlockHeader* header = reinterpret_cast<const BlockHeader*>(data.iov_base);
-
-                size_t diff_size = 0;
-                if(header->diff_bits == 16) {
-                    diff_size = sizeof(uint16_t);
-                } else if(header->diff_bits == 32) {
-                    diff_size = sizeof(uint32_t);
-                }
-                else {
-                    return {nullptr, nullptr, 0, 0, 0};
-                }
-
-                size_t value_size = (header->version == 4) ? sizeof(float) : sizeof(uint8_t);
-                size_t required_size = sizeof(BlockHeader) + header->n * diff_size + header->n * value_size;
-                if(data.iov_len < required_size) {
-                    return {nullptr, nullptr, 0, 0, 0};
-                }
-
-                const uint8_t* ptr =
-                        static_cast<const uint8_t*>(data.iov_base) + sizeof(BlockHeader);
-
-                const void* doc_diffs = ptr;
-                // const uint8_t* values = ptr + header->n * diff_size;
-                const uint8_t* values = ptr + header->n * diff_size + header->alignment_pad;
-
-                return {doc_diffs,
-                        values,
-                        header->n,
-                        header->diff_bits,
-                        static_cast<uint8_t>((header->version == 4) ? 32 : 8)};
-            }
-            return {nullptr, nullptr, 0, 0, 0};
-        }
-
-        // ndd::idInt getBlockEndDocId(const std::vector<BlockIdx>& blocks, size_t block_idx) const {
-        //     if(block_idx + 1 < blocks.size()) {
-        //         return blocks[block_idx + 1].start_doc_id - 1;
-        //     }
-        //     return std::numeric_limits<ndd::idInt>::max();
-        // }
-
-        bool addToBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt doc_id, float value) {
-            // Get or create blocks for this term
-            auto& blocks = term_blocks_index_[term_id];
-
-            // Find the appropriate block
-            auto block_it = findBlockIterator(blocks, doc_id);
-
-            // Check if we need to split due to range (if > UINT16_MAX, cannot fit in uint16 diff)
-            // This is a constraint for 16-bit blocks. If we enable mix, we don't strict need to
-            // check unless we want to force 16-bit.
-
-            bool force_new_block = false;
-            if(block_it != blocks.end() && block_it->start_doc_id <= doc_id) {
-                if((doc_id - block_it->start_doc_id) > UINT16_MAX) {
-                    force_new_block = true;
-                }
-            }
-
-            if(block_it == blocks.end() || block_it->start_doc_id > doc_id || force_new_block) {
-                // Need to create a new block
-
-                // Insert into index list
-                // If forcing new block, we insert AFTER block_it if block_it exists and is < doc_id
-                // findBlockIterator returns iterator <= doc_id.
-
-                std::vector<BlockIdx>::iterator insert_it;
-                if(force_new_block && block_it != blocks.end()) {
-                    insert_it = block_it + 1;
-                } else {
-                    insert_it = block_it;
-                }
-
-                blocks.insert(insert_it, BlockIdx(doc_id, value));
-
-                // Create the actual block data
-                std::vector<BlockEntry> entries;
-                entries.emplace_back(0, value);  // doc_diff = 0
-
-                BlockHeader header;
-                // header fields set by saveBlock
-
-                return saveBlock(txn, term_id, doc_id, entries, header);
-            }
-
-            // Add to existing block
-            auto block_entries = loadBlock(txn, term_id, block_it->start_doc_id);
-
-            ndd::idInt doc_diff = doc_id - block_it->start_doc_id;
-
-            // Find insertion point (keep sorted by doc_diff)
-            auto entry_it = std::lower_bound(
-                    block_entries.begin(), block_entries.end(), BlockEntry(doc_diff, 0.0f));
-
-            if(entry_it != block_entries.end() && entry_it->doc_diff == doc_diff) {
-                // Update existing entry
-                entry_it->value = value;
-            } else {
-                // Insert new entry
-                block_entries.insert(entry_it, BlockEntry(doc_diff, value));
-            }
-
-            // Check if block needs splitting
-            if(block_entries.size() > settings::MAX_BMW_BLOCK_SIZE) {
-                BlockHeader header;
-                bool saved = saveBlock(txn, term_id, block_it->start_doc_id, block_entries, header);
-                if(!saved) {
-                    return false;
-                }
-                block_it->block_max_value = header.block_max_value;
-                return splitBlock(txn, term_id, block_it->start_doc_id);
-            }
-
-            BlockHeader header;
-            // Fields set by saveBlock
-
-            bool success = saveBlock(txn, term_id, block_it->start_doc_id, block_entries, header);
-            if(success) {
-                // Keep cached block max synchronized (increase or decrease).
-                block_it->block_max_value = header.block_max_value;
-            }
-            return success;
-        }
-
-        bool removeFromBlock(MDBX_txn* txn, uint32_t term_id, ndd::idInt doc_id) {
-            auto it = term_blocks_index_.find(term_id);
-            if(it == term_blocks_index_.end()) {
-                return false;  // Term not found
-            }
-
-            auto& blocks = it->second;
-            auto block_it = findBlockIterator(blocks, doc_id);
-
-            if(block_it == blocks.end() || block_it->start_doc_id > doc_id) {
-                return false;
-            }
-
-            // Logic similar to addToBlock. Load, modify, Save.
-            // We do basic range check to avoid loading obviously wrong block
-            if((doc_id - block_it->start_doc_id) > 200000) {  // Safety heuristic
-                return false;
-            }
-
-            // Load block
-            auto block_entries = loadBlock(txn, term_id, block_it->start_doc_id);
-            size_t block_idx = std::distance(blocks.begin(), block_it);
-            ndd::idInt doc_diff = doc_id - block_it->start_doc_id;
-
-            auto entry_it = std::lower_bound(
-                    block_entries.begin(), block_entries.end(), BlockEntry(doc_diff, 0.0f));
-
-            if(entry_it != block_entries.end() && entry_it->doc_diff == doc_diff) {
-                entry_it->value = 0.0f;  // Mark as tombstone (0.0f)
-
-                BlockHeader header;
-                // Fields set by saveBlock
-                bool success = saveBlock(txn, term_id, block_it->start_doc_id, block_entries, header);
-                if(success) {
-                    block_it->block_max_value = header.block_max_value;
-
-                    // Deterministic 1/8 compaction trigger to avoid extra RNG overhead.
-                    if((doc_id % 8) == 0) {
-                        if(!compactBlockAfterDelete(txn, term_id, block_idx, block_entries)) {
-                            return false;
-                        }
-                    }
-                }
-                return success;
-            }
-
-            return false;
-        }
-
-        /// Finds the longest posting list. If all its remaining elements up to the next
-        /// doc_id in other lists cannot beat min_score, skip them.
-        ///
-        /// Uses block-level suffix-max as the upper bound (conservative but correct).
-        void pruneLongest(std::vector<BlockIterator*>& iters, float min_score) {
-            if(iters.size() < 2) {
-                return;
-            }
-
-            // Find iterator with most remaining blocks (proxy for longest)
             size_t longest_idx = 0;
-            size_t longest_rem = 0;
-            for(size_t i = 0; i < iters.size(); ++i) {
-                size_t rem = iters[i]->remainingBlocks();
-                if(rem > longest_rem) {
+            uint32_t longest_rem = 0;
+            for (size_t i = 0; i < iters.size(); i++) {
+                uint32_t rem = iters[i]->remainingEntries();
+                if (rem > longest_rem) {
                     longest_rem = rem;
                     longest_idx = i;
                 }
             }
 
-            // Swap longest to front
-            if(longest_idx != 0) {
-                std::swap(iters[0], iters[longest_idx]);
+            if (longest_idx != 0) {
+                PostingListIterator* tmp = iters[0];
+                iters[0] = iters[longest_idx];
+                iters[longest_idx] = tmp;
             }
 
-            auto* longest = iters[0];
-            if(longest->current_doc_id == std::numeric_limits<ndd::idInt>::max()) {
-                return;
-            }
+            PostingListIterator* longest = iters[0];
+            if (longest->current_doc_id == EXHAUSTED_DOC_ID) return;
 
             ndd::idInt longest_doc = longest->current_doc_id;
 
-            // Find minimum doc_id across all OTHER iterators
-            ndd::idInt others_min = std::numeric_limits<ndd::idInt>::max();
-            for(size_t i = 1; i < iters.size(); ++i) {
-                if(iters[i]->current_doc_id < others_min) {
+            // Find the earliest doc_id in all OTHER lists.
+            ndd::idInt others_min = EXHAUSTED_DOC_ID;
+            for (size_t i = 1; i < iters.size(); i++) {
+                if (iters[i]->current_doc_id < others_min) {
                     others_min = iters[i]->current_doc_id;
                 }
             }
 
-            if(others_min <= longest_doc) {
-                // Can't prune:
-                //   == means this doc appears in multiple lists, must score fully
-                //   <  means other lists have earlier docs that need scoring first
-                return;
-            }
+            // If another list has docs at or before ours, we can't prune:
+            // those docs might appear in multiple lists and need full scoring.
+            if (others_min <= longest_doc) return;
 
-            // All docs from longest_doc to others_min-1 appear ONLY in the longest list.
-            // Their max possible score = max_remaining_weight * query_weight.
-            // If that can't beat min_score, skip them all.
+            float max_possible = longest->upperBound();
 
-            float max_weight = longest->maxRemainingWeight();
-            float max_possible = max_weight * longest->term_weight;
-
-            if(max_possible <= min_score) {
-                if(others_min == std::numeric_limits<ndd::idInt>::max()) {
-                    // All other iterators exhausted — skip entire remaining list
-                    longest->current_doc_id = std::numeric_limits<ndd::idInt>::max();
-                    longest->current_block_idx = longest->blocks->size();
+            if (max_possible <= min_score) {
+                if (others_min == EXHAUSTED_DOC_ID) {
+                    // All other lists are done — skip everything remaining.
+                    longest->current_doc_id = EXHAUSTED_DOC_ID;
+                    longest->current_entry_idx = longest->data_size;
                 } else {
-                    // Skip to the doc where other lists resume
+                    // Jump to where other lists resume.
                     longest->advance(others_min);
                 }
             }

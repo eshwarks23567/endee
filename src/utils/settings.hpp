@@ -62,7 +62,6 @@ namespace settings {
     constexpr size_t MAX_LINK_LIST_LOCKS = 65536;
 
     // Sparse Storage settings
-    constexpr size_t MAX_BMW_BLOCK_SIZE = 128000000;
     constexpr float NEAR_ZERO = 1e-9f;
 
     // Maximum number of elements in the index

@@ -261,7 +261,6 @@ namespace ndd {
         // Statistics
         size_t get_vector_count() const { return vector_count_; }
         size_t get_term_count() const { return bmw_index_ ? bmw_index_->getTermCount() : 0; }
-        size_t get_block_count() const { return bmw_index_ ? bmw_index_->getBlockCount() : 0; }
 
         // Maintenance
         bool compact() {
