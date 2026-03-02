@@ -204,9 +204,9 @@ namespace ndd {
         // =====================================================================
 
         size_t findDocIdSIMD(const uint32_t* doc_ids,
-                             size_t size,
-                             size_t start_idx,
-                             uint32_t target) const;
+                                size_t size,
+                                size_t start_idx,
+                                uint32_t target) const;
 
         size_t findNextLiveSIMD(const uint8_t* values,
                                 size_t size,
@@ -218,11 +218,15 @@ namespace ndd {
 
         PostingListView getReadOnlyPostingList(MDBX_txn* txn, uint32_t term_id) const;
 
-        std::vector<PostingListEntry> loadPostingList(MDBX_txn* txn, uint32_t term_id) const;
+        std::vector<PostingListEntry> loadPostingList(MDBX_txn* txn, uint32_t term_id,
+                                                        uint32_t* out_live_count = nullptr,
+                                                        float* out_max_value = nullptr) const;
 
         bool savePostingList(MDBX_txn* txn,
-                             uint32_t term_id,
-                             const std::vector<PostingListEntry>& entries);
+                            uint32_t term_id,
+                            const std::vector<PostingListEntry>& entries,
+                            uint32_t live_count,
+                            float max_val);
 
         bool deletePostingList(MDBX_txn* txn, uint32_t term_id);
 

@@ -92,7 +92,7 @@ namespace ndd {
      * 1. For each query term, open a read-only iterator over its
      *    posting list (zero-copy pointer into the MDBX page).
      *
-     * 2. Process document IDs in contiguous batches of BATCH_SIZE.
+     * 2. Process document IDs in contiguous batches of settings::INV_IDX_SEARCH_BATCH_SZ.
      *    - For each posting list, walk entries whose doc_id falls
      *      within [batch_start, batch_end].
      *    - Accumulate: scores_buf[doc_id - batch_start] += doc_weight * query_weight
@@ -123,8 +123,6 @@ namespace ndd {
             LOG_ERROR("Failed to begin search transaction: " << mdbx_strerror(rc));
             return {};
         }
-
-        static constexpr size_t BATCH_SIZE = 10000;
 
         // -- STEP 1: Build an iterator per query term --
 
@@ -170,7 +168,7 @@ namespace ndd {
         bool use_pruning = (iters.size() > 1);
         float best_min_score = 0.0f;
 
-        std::vector<float> scores_buf(BATCH_SIZE, 0.0f);
+        std::vector<float> scores_buf(settings::INV_IDX_SEARCH_BATCH_SZ, 0.0f);
         std::priority_queue<ScoredDoc> top_results;  // min-heap of size k
         float threshold = 0.0f;  // score of the current k-th best result
 
@@ -186,7 +184,8 @@ namespace ndd {
 
         while (min_id != EXHAUSTED_DOC_ID) {
             ndd::idInt batch_start = min_id;
-            ndd::idInt batch_end = batch_start + (ndd::idInt)BATCH_SIZE - 1;
+            ndd::idInt batch_end = batch_start +
+                                (ndd::idInt)settings::INV_IDX_SEARCH_BATCH_SZ - 1;
             if (batch_end < batch_start) {
                 batch_end = EXHAUSTED_DOC_ID - 1;  // overflow guard
             }
@@ -561,7 +560,9 @@ namespace ndd {
     }
 
     std::vector<PostingListEntry>
-    InvertedIndex::loadPostingList(MDBX_txn* txn, uint32_t term_id) const
+    InvertedIndex::loadPostingList(MDBX_txn* txn, uint32_t term_id,
+                                    uint32_t* out_live_count,
+                                    float* out_max_value) const
     {
         MDBX_val key;
         uint32_t tid = term_id;
@@ -583,6 +584,15 @@ namespace ndd {
         }
 
         uint32_t n = header->n;
+
+        if (out_live_count){
+            *out_live_count = header->live_count;
+        }
+
+        if (out_max_value){
+            *out_max_value = header->max_value;
+        }
+
         entries.resize(n);
 
         const uint8_t* ptr =
@@ -608,7 +618,9 @@ namespace ndd {
 
     bool InvertedIndex::savePostingList(MDBX_txn* txn,
                                    uint32_t term_id,
-                                   const std::vector<PostingListEntry>& entries)
+                                   const std::vector<PostingListEntry>& entries,
+                                   uint32_t live_count,
+                                   float max_val)
     {
         MDBX_val key;
         uint32_t tid = term_id;
@@ -617,21 +629,10 @@ namespace ndd {
 
         uint32_t n = (uint32_t)entries.size();
 
-        float max_val = 0.0f;
-        uint32_t live = 0;
-        for (uint32_t i = 0; i < n; i++) {
-            if (entries[i].value > max_val) {
-                max_val = entries[i].value;
-            }
-            if (entries[i].value > 1e-9f) {
-                live++;
-            }
-        }
-
         PostingListHeader header;
         header.version = 5;
         header.n = n;
-        header.live_count = live;
+        header.live_count = live_count;
         header.max_value = max_val;
 
 #if defined(NDD_INV_IDX_STORE_FLOATS)
@@ -704,7 +705,7 @@ namespace ndd {
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if (rc != 0) {
             LOG_ERROR("Failed to begin transaction for loading term info: "
-                      << mdbx_strerror(rc));
+                        << mdbx_strerror(rc));
             return false;
         }
 
@@ -766,33 +767,45 @@ namespace ndd {
             std::vector<PostingListEntry> merged;
             merged.reserve(existing.size() + updates.size());
 
+            uint32_t live_count = 0;
+            float max_val = 0.0f;
+
+            /* updates the live_count and max_val */
+            auto track = [&](const PostingListEntry& e) {
+                merged.push_back(e);
+                if (e.value > 0.0f) {
+                    live_count++;
+                    if (e.value > max_val) max_val = e.value;
+                }
+            };
+
             size_t ei = 0;
             size_t ui = 0;
             while (ei < existing.size() && ui < updates.size()) {
                 ndd::idInt existing_id = existing[ei].doc_id;
                 ndd::idInt update_id = updates[ui].first;
                 if (existing_id < update_id) {
-                    merged.push_back(existing[ei]);
+                    track(existing[ei]);
                     ei++;
                 } else if (existing_id > update_id) {
-                    merged.push_back(PostingListEntry(update_id, updates[ui].second));
+                    track(PostingListEntry(update_id, updates[ui].second));
                     ui++;
                 } else {
-                    merged.push_back(PostingListEntry(update_id, updates[ui].second));
+                    track(PostingListEntry(update_id, updates[ui].second));
                     ei++;
                     ui++;
                 }
             }
             while (ei < existing.size()) {
-                merged.push_back(existing[ei]);
+                track(existing[ei]);
                 ei++;
             }
             while (ui < updates.size()) {
-                merged.push_back(PostingListEntry(updates[ui].first, updates[ui].second));
+                track(PostingListEntry(updates[ui].first, updates[ui].second));
                 ui++;
             }
 
-            if (!savePostingList(txn, term_id, merged)) {
+            if (!savePostingList(txn, term_id, merged, live_count, max_val)) {
                 LOG_ERROR("Failed to save posting list for term " << term_id);
                 return false;
             }
@@ -808,7 +821,10 @@ namespace ndd {
         for (size_t i = 0; i < vec.indices.size(); i++) {
             uint32_t term_id = vec.indices[i];
 
-            std::vector<PostingListEntry> entries = loadPostingList(txn, term_id);
+            uint32_t live_count = 0;
+            float max_val = 0.0f;
+            std::vector<PostingListEntry> entries =
+                loadPostingList(txn, term_id, &live_count, &max_val);
             if (entries.empty()) continue;
 
             // Binary search for the doc_id in the sorted list.
@@ -824,21 +840,36 @@ namespace ndd {
             }
 
             if (lo < entries.size() && entries[lo].doc_id == doc_id) {
-                entries[lo].value = 0.0f;  // tombstone
+                // Only decrement live_count if the entry is actually live.
+                uint32_t new_live = live_count;
+                if(entries[lo].value > 0.0f){
+                    //this doc was live earlier.
+                    new_live -= 1;
+                }
 
-                /**
-                 * Periodic compaction: physically remove all tombstones.
-                 * XXX: TODO: the periodic compaction work should be more robust.
-                 * It cannot be based on doc_id % 8 and has to be configurable.
-                 */
-                if ((doc_id % 8) == 0) {
+                entries[lo].value = 0.0f; // create a tombstone
+
+                // Compact when tombstone ratio exceeds the configured threshold.
+                uint32_t total = (uint32_t)entries.size();
+                float ratio = (float)(total - new_live) / (float)total;
+
+                if (ratio >= settings::INV_IDX_COMPACTION_TOMBSTONE_RATIO) {
+                    //begin compaction
+
+                    float compacted_max = 0.0f;
                     size_t write = 0;
                     for (size_t j = 0; j < entries.size(); j++) {
                         if (entries[j].value > 0.0f) {
-                            entries[write++] = entries[j];
+                            if (entries[j].value > compacted_max)
+                                compacted_max = entries[j].value;
+
+                            write += 1;
+                            entries[write] = entries[j];
                         }
                     }
                     entries.resize(write);
+                    new_live = (uint32_t)write;
+                    max_val = compacted_max;
 
                     if (entries.empty()) {
                         deletePostingList(txn, term_id);
@@ -846,7 +877,7 @@ namespace ndd {
                     }
                 }
 
-                if (!savePostingList(txn, term_id, entries)) {
+                if (!savePostingList(txn, term_id, entries, new_live, max_val)) {
                     return false;
                 }
             }

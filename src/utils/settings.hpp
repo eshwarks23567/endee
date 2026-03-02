@@ -61,8 +61,14 @@ namespace settings {
 
     constexpr size_t MAX_LINK_LIST_LOCKS = 65536;
 
-    // Sparse Storage settings
+    // Sparse Index settings
+    /*XXX: Should we make this a runtime configurable value ?*/
+    constexpr size_t INV_IDX_SEARCH_BATCH_SZ = 10'000;
     constexpr float NEAR_ZERO = 1e-9f;
+
+    // Compact a posting list when the fraction of tombstoned entries
+    // reaches this threshold (0.0 = compact every delete, 1.0 = never).
+    constexpr float INV_IDX_COMPACTION_TOMBSTONE_RATIO = 0.1f;
 
     // Maximum number of elements in the index
     constexpr size_t MAX_VECTORS_ADMIN = 1'000'000'000;
