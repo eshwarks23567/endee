@@ -136,7 +136,7 @@ struct PersistenceConfig {
     bool save_on_shutdown{true};
 };
 
-#include "backup_store.hpp"
+#include "../storage/backup_store.hpp"
 
 class IndexManager {
 private:

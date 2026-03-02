@@ -15,7 +15,7 @@ IndexManager (ndd.hpp)
 │   listBackups, deleteBackup, getActiveBackup, getBackupInfo, validateBackupName
 └── Handles: saveIndexInternal, getIndexEntry, metadata_manager_, loadIndex
 
-BackupStore (backup_store.hpp — standalone, no IndexManager dependency)
+BackupStore (src/storage/backup_store.hpp — standalone, no IndexManager dependency)
 ├── Archive: createBackupTar(), extractBackupTar()
 ├── Helpers: getUserBackupDir(), getUserTempDir(), readBackupJson(), writeBackupJson(), cleanupTempDir()
 ├── Active backup: setActiveBackup(), clearActiveBackup(), hasActiveBackup(), getActiveBackup()

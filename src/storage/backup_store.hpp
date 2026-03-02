@@ -15,9 +15,9 @@
 #include <archive_entry.h>
 
 #include "json/nlohmann_json.hpp"
-#include "../storage/index_meta.hpp"
-#include "../utils/settings.hpp"
-#include "../utils/log.hpp"
+#include "index_meta.hpp"
+#include "settings.hpp"
+#include "log.hpp"
 
 struct ActiveBackup {
     std::string index_id;
