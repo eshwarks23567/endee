@@ -550,7 +550,7 @@ namespace ndd {
             const void* values = ptr + n * sizeof(uint32_t);
             size_t required = sizeof(PostingListHeader)
                               + n * sizeof(uint32_t) + n * sizeof(uint8_t);
-#endif
+#endif //NDD_INV_IDX_STORE_FLOATS
 
             if (data.iov_len < required) {
                 return {nullptr, nullptr, 0, 0, 0.0f};
@@ -614,7 +614,7 @@ namespace ndd {
             entries[i].doc_id = doc_ids[i];
             entries[i].value = dequantize(vals[i], header->max_value);
         }
-#endif
+#endif //NDD_INV_IDX_STORE_FLOATS
 
         return entries;
     }
@@ -642,7 +642,7 @@ namespace ndd {
         size_t value_size = sizeof(float);
 #else
         size_t value_size = sizeof(uint8_t);
-#endif
+#endif //NDD_INV_IDX_STORE_FLOATS
 
         size_t total_size = sizeof(PostingListHeader)
                             + n * sizeof(uint32_t) + n * value_size;
@@ -668,7 +668,7 @@ namespace ndd {
         for (uint32_t i = 0; i < n; i++) {
             vals_out[i] = quantize(entries[i].value, max_val);
         }
-#endif
+#endif //NDD_INV_IDX_STORE_FLOATS
 
         MDBX_val mdata;
         mdata.iov_base = buffer.data();
@@ -677,7 +677,7 @@ namespace ndd {
         int rc = mdbx_put(txn, term_postings_dbi_, &key, &mdata, MDBX_UPSERT);
         if (rc != 0) {
             LOG_ERROR("Failed to save posting list for term "
-                      << term_id << ": " << mdbx_strerror(rc));
+                        << term_id << ": " << mdbx_strerror(rc));
             return false;
         }
 
