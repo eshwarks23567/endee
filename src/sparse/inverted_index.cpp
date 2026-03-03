@@ -855,11 +855,11 @@ namespace ndd {
                     size_t write = 0;
                     for (size_t j = 0; j < entries.size(); j++) {
                         if (entries[j].value > 0.0f) {
-                            if (entries[j].value > compacted_max)
+                            if (entries[j].value > compacted_max){
                                 compacted_max = entries[j].value;
-
-                            write += 1;
+                            }
                             entries[write] = entries[j];
+                            write += 1;
                         }
                     }
                     entries.resize(write);
