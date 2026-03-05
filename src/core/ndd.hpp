@@ -1614,7 +1614,6 @@ public:
         // Remove from in-memory structures if loaded
         auto it = indices_.find(index_id);
         if(it != indices_.end()) {
-            // Wait for any in-progress operation (addVectors, deleteVector, etc.) to finish
             std::lock_guard<std::mutex> operation_lock(it->second.operation_mutex);
 
             auto indx_it = std::find(indices_list_.begin(), indices_list_.end(), index_id);
