@@ -60,7 +60,7 @@ namespace settings {
 
     // Sparse Index settings
     /*XXX: Should we make this a runtime configurable value ?*/
-    constexpr size_t INV_IDX_SEARCH_BATCH_SZ = 10'000;
+    constexpr size_t DEFAULT_INV_IDX_SEARCH_BATCH_SZ = 10'000;
     constexpr float NEAR_ZERO = 1e-9f;
 
     // Compact a posting list when the fraction of tombstoned entries
@@ -123,6 +123,11 @@ namespace settings {
         }
 
         return (size_t)DEFAULT_NUM_SERVER_THREADS;
+    }();
+
+    inline static size_t INV_IDX_SEARCH_BATCH_SZ = [] {
+        const char* env = std::getenv("NDD_INV_IDX_SEARCH_BATCH_SZ");
+        return env ? std::stoull(env) : DEFAULT_INV_IDX_SEARCH_BATCH_SZ;
     }();
 
     inline static size_t SERVER_PORT = [] {
