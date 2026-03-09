@@ -1162,25 +1162,6 @@ namespace ndd {
         return recomputed_max;
     }
 
-    bool InvertedIndex::deleteAllBlocksForTerm(MDBX_txn* txn, uint32_t term_id) {
-        std::vector<uint32_t> block_nrs;
-        bool ok = iterateTermBlocks(txn,
-                                    term_id,
-                                    [&block_nrs](uint32_t block_nr, const MDBX_val&) {
-                                        block_nrs.push_back(block_nr);
-                                        return true;
-                                    });
-        if (!ok) return false;
-
-        for (uint32_t block_nr : block_nrs) {
-            if (!deleteBlock(txn, term_id, block_nr)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     // =========================================================================
     // Startup
     // =========================================================================

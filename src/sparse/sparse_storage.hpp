@@ -215,17 +215,6 @@ namespace ndd {
         size_t get_vector_count() const { return vector_count_; }
         size_t get_term_count() const { return sparse_index_ ? sparse_index_->getTermCount() : 0; }
 
-        // Maintenance
-        bool compact() {
-            // MDBX compaction usually involves copying to a new file
-            return true;
-        }
-
-        bool backup(const std::string& backup_path) {
-            // MDBX backup
-            return true;
-        }
-
     private:
         std::string db_path_;
         MDBX_env* env_;
@@ -344,22 +333,6 @@ namespace ndd {
                 mdbx_txn_abort(txn);
             }
         }
-    };
-
-    // MDBX Transaction RAII wrapper
-    class MDBXTransaction {
-    public:
-        MDBXTransaction(MDBX_env* env, bool read_only = false);
-        ~MDBXTransaction();
-
-        bool commit();
-        void abort();
-
-        MDBX_txn* txn = nullptr;
-
-    private:
-        bool committed_ = false;
-        bool read_only_;
     };
 
 }  // namespace ndd

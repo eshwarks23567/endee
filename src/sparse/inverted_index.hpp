@@ -297,8 +297,6 @@ namespace ndd {
 
         float recomputeGlobalMaxFromBlocks(MDBX_txn* txn, uint32_t term_id) const;
 
-        bool deleteAllBlocksForTerm(MDBX_txn* txn, uint32_t term_id);
-
         bool loadTermInfo();
 
         bool addDocumentsBatchInternal(
