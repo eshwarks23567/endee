@@ -18,6 +18,7 @@ namespace settings {
     inline const std::string NAME = "Endee";
     inline const std::string VERSION = "1.0.0-beta";
     inline uint16_t INDEX_VERSION = 1;
+    inline uint16_t SPARSE_ONDISK_VERSION = 1;
     inline const std::string DEFAULT_SPACE_TYPE = "cosine";
     constexpr size_t DEFAULT_STORAGE_BITS =
             16;  // 16 bits = 2 bytes per element. Only for dense vectors

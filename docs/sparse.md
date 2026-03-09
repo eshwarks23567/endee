@@ -118,9 +118,10 @@ packed_key = (uint64(term_id) << 32) | uint64(block_nr)
 
 This puts all rows for one term next to each other in MDBX's sorted key order, so you can seek to `(term_id, 0)` and iterate forward.
 
-Two reserved values:
+Reserved keys:
 - `block_nr = UINT32_MAX` → this row is the **metadata row** for the term (stores `PostingListHeader`)
-- `term_id = UINT32_MAX` → reserved sentinel, rejected by all code paths
+- `(term_id = UINT32_MAX, block_nr = 0)` → the **superblock** — a single row storing `SuperBlock` (format version metadata)
+- `term_id = UINT32_MAX` is otherwise a reserved sentinel, rejected by all code paths
 
 ### Blocks
 
@@ -134,6 +135,24 @@ block_offset = doc_id % 65535    (uint16_t)
 `kBlockCapacity = 65535` (`std::numeric_limits<uint16_t>::max()`). This means block offsets fit in 16 bits.
 
 Each MDBX row for `(term_id, block_nr)` stores exactly the postings from that term that fall into that block's doc-id range. This is the fundamental design choice — writes are block-local merges, not whole-list rewrites.
+
+### SuperBlock
+
+A single metadata row stored at key `packPostingKey(UINT32_MAX, 0)`:
+
+```cpp
+struct SuperBlock {             // 1 byte, packed
+    uint8_t format_version;     // must match settings::SPARSE_ONDISK_VERSION
+};
+```
+
+On `initialize()`, the inverted index calls `validateSuperBlock()` which:
+1. Reads the superblock row.
+2. If not found and the DB is empty (fresh) → writes a new superblock with `format_version = settings::SPARSE_ONDISK_VERSION`.
+3. If not found but the DB has existing rows → throws `std::runtime_error` (legacy incompatible database).
+4. If found but `format_version != settings::SPARSE_ONDISK_VERSION` → throws `std::runtime_error` (version mismatch).
+
+This key doesn't interfere with normal iteration: `loadTermInfo()` filters out `term_id == UINT32_MAX`, and `iterateTermBlocks()` seeks to specific term IDs that are never `UINT32_MAX`.
 
 ### Per-term metadata: PostingListHeader
 
@@ -156,8 +175,7 @@ Stored at key `(term_id, block_nr)`:
 ```
 
 ```cpp
-struct BlockHeader {             // 10 bytes, packed
-    uint8_t  version;            // always 1 currently
+struct BlockHeader {             // 8 bytes, packed
     uint16_t nr_entries;
     uint16_t nr_live_entries;
     float    max_value;          // block-local max weight
@@ -336,6 +354,7 @@ Two SIMD-accelerated functions with implementations for AVX-512, AVX2, NEON, and
 | `INV_IDX_SEARCH_BATCH_SZ` | 10,000 | Size of the dense scoring window. Configurable via `NDD_INV_IDX_SEARCH_BATCH_SZ` env var. |
 | `INV_IDX_COMPACTION_TOMBSTONE_RATIO` | 0.10 | When this fraction of a block's entries are tombstones during delete, compact in-place. |
 | `NEAR_ZERO` | 1e-9 | Epsilon for float comparisons. |
+| `SPARSE_ONDISK_VERSION` | 1 | Format version written to the superblock. Checked on load; mismatch throws. |
 
 ## Putting it all together — data flow diagram
 

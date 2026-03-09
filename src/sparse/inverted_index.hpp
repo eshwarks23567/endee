@@ -39,11 +39,15 @@ namespace ndd {
 
     // Header that prefixes each on-disk (term_id, block_nr) payload.
     struct BlockHeader {
-        //TODO: on-disk version need not be in each block header
-        uint8_t version = 1;
         uint16_t nr_entries = 0;
         uint16_t nr_live_entries = 0;
         float max_value = 0.0f;
+    };
+
+    // Single metadata row stored at packPostingKey(kMetadataTermId, kSuperBlockBlockNr).
+    // Checked on initialize() to reject incompatible databases.
+    struct SuperBlock {
+        uint8_t format_version = 0;
     };
 #pragma pack(pop)
 
@@ -105,11 +109,10 @@ namespace ndd {
 
         using BlockOffset = uint16_t;
         static constexpr uint32_t kBlockCapacity = std::numeric_limits<BlockOffset>::max();
-        static constexpr uint8_t kOnDiskVersion = 1;
-
         // Sentinel IDs reserved for metadata rows in blocked_term_postings.
         static constexpr uint32_t kMetadataTermId = std::numeric_limits<uint32_t>::max();
         static constexpr uint32_t kMetadataBlockNr = std::numeric_limits<uint32_t>::max();
+        static constexpr uint32_t kSuperBlockBlockNr = 0;
 
         static inline uint8_t quantize(float val, float max_val);
         static inline float dequantize(uint8_t val, float max_val);
@@ -313,6 +316,10 @@ namespace ndd {
                                      int64_t live_delta);
 
         bool loadTermInfo();
+
+        bool readSuperBlock(MDBX_txn* txn, SuperBlock* out, bool* out_found) const;
+        bool writeSuperBlock(MDBX_txn* txn, const SuperBlock& sb);
+        bool validateSuperBlock(MDBX_txn* txn);
 
         bool addDocumentsBatchInternal(
             MDBX_txn* txn,

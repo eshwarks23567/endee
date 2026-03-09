@@ -278,6 +278,46 @@ namespace ndd {
         header.nr_live_entries = static_cast<uint32_t>(new_live);
     }
 
+    bool InvertedIndex::validateSuperBlock(MDBX_txn* txn) {
+        SuperBlock sb;
+        bool sb_found = false;
+        if (!readSuperBlock(txn, &sb, &sb_found)) {
+            return false;
+        }
+
+        if (!sb_found) {
+            // Check whether the DBI already has data (legacy DB without superblock).
+            MDBX_stat stat;
+            int rc = mdbx_dbi_stat(txn, blocked_term_postings_dbi_, &stat, sizeof(stat));
+            if (rc == MDBX_SUCCESS && stat.ms_entries > 0) {
+                LOG_ERROR("Sparse index database exists but has no superblock. "
+                          "This database was created by an older incompatible version.");
+                throw std::runtime_error(
+                    "Incompatible sparse index: database has no superblock (legacy format)");
+            }
+
+            // Fresh database — write the superblock.
+            sb.format_version = settings::SPARSE_ONDISK_VERSION;
+            if (!writeSuperBlock(txn, sb)) {
+                return false;
+            }
+            return true;
+        }
+
+        if (sb.format_version != settings::SPARSE_ONDISK_VERSION) {
+            LOG_ERROR("Sparse index format version mismatch: on-disk="
+                      << (int)sb.format_version
+                      << " compiled=" << (int)settings::SPARSE_ONDISK_VERSION);
+            throw std::runtime_error(
+                "Incompatible sparse index: format version "
+                + std::to_string(sb.format_version)
+                + " does not match compiled version "
+                + std::to_string(settings::SPARSE_ONDISK_VERSION));
+        }
+
+        return true;
+    }
+
     bool InvertedIndex::initialize() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
@@ -294,6 +334,11 @@ namespace ndd {
                             &blocked_term_postings_dbi_);
         if (rc != MDBX_SUCCESS) {
             LOG_ERROR("Failed to open blocked_term_postings dbi: " << mdbx_strerror(rc));
+            mdbx_txn_abort(txn);
+            return false;
+        }
+
+        if (!validateSuperBlock(txn)) {
             mdbx_txn_abort(txn);
             return false;
         }
@@ -829,6 +874,50 @@ namespace ndd {
     }
 
     // =========================================================================
+    // Superblock helpers
+    // =========================================================================
+
+    bool InvertedIndex::readSuperBlock(MDBX_txn* txn,
+                                       SuperBlock* out,
+                                       bool* out_found) const {
+        if (out_found) *out_found = false;
+
+        uint64_t packed = packPostingKey(kMetadataTermId, kSuperBlockBlockNr);
+        MDBX_val key{&packed, sizeof(packed)};
+        MDBX_val data;
+
+        int rc = mdbx_get(txn, blocked_term_postings_dbi_, &key, &data);
+        if (rc == MDBX_NOTFOUND) {
+            return true;
+        }
+        if (rc != MDBX_SUCCESS) {
+            LOG_ERROR("readSuperBlock mdbx_get failed: " << mdbx_strerror(rc));
+            return false;
+        }
+        if (data.iov_len < sizeof(SuperBlock)) {
+            LOG_ERROR("readSuperBlock: corrupt superblock (too small)");
+            return false;
+        }
+
+        std::memcpy(out, data.iov_base, sizeof(SuperBlock));
+        if (out_found) *out_found = true;
+        return true;
+    }
+
+    bool InvertedIndex::writeSuperBlock(MDBX_txn* txn, const SuperBlock& sb) {
+        uint64_t packed = packPostingKey(kMetadataTermId, kSuperBlockBlockNr);
+        MDBX_val key{&packed, sizeof(packed)};
+        MDBX_val data{const_cast<SuperBlock*>(&sb), sizeof(SuperBlock)};
+
+        int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &data, MDBX_UPSERT);
+        if (rc != MDBX_SUCCESS) {
+            LOG_ERROR("writeSuperBlock mdbx_put failed: " << mdbx_strerror(rc));
+            return false;
+        }
+        return true;
+    }
+
+    // =========================================================================
     // Metadata and block helpers
     // =========================================================================
 
@@ -892,11 +981,6 @@ namespace ndd {
         if (data.iov_len < sizeof(BlockHeader)) return false;
 
         const BlockHeader* header = (const BlockHeader*)data.iov_base;
-        if (header->version != kOnDiskVersion) {
-            LOG_ERROR("Sparse data version not matching : " << kOnDiskVersion);
-            return false;
-        }
-
         uint32_t n = header->nr_entries;
 
         const uint8_t* ptr = (const uint8_t*)data.iov_base + sizeof(BlockHeader);
@@ -1024,7 +1108,6 @@ namespace ndd {
         }
 
         BlockHeader header;
-        header.version = kOnDiskVersion;
         header.nr_entries = (uint16_t)entries.size();
         header.nr_live_entries = (uint16_t)live_count;
         header.max_value = max_val;
@@ -1161,9 +1244,6 @@ namespace ndd {
                                         }
                                         const BlockHeader* header =
                                             (const BlockHeader*)data.iov_base;
-                                        if (header->version != kOnDiskVersion) {
-                                            return false;
-                                        }
                                         if (header->max_value > recomputed_max) {
                                             recomputed_max = header->max_value;
                                         }
