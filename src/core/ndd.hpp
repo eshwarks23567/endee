@@ -27,7 +27,6 @@
 #include <random>
 #include <type_traits>
 #include <future>
-#include <shared_mutex>
 
 struct IndexConfig {
     size_t dim;
@@ -976,10 +975,9 @@ public:
                 threads.emplace_back([&, t]() {
                     // Calculate start and end indices for this thread
                     size_t start_idx = t * chunk_size;
-                    size_t end_idx = start_idx + 1;
-                    // size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                    //                         ? (start_idx + chunk_size)
-                    //                         : quantized_vectors.size();
+                    size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
+                                            ? (start_idx + chunk_size)
+                                            : quantized_vectors.size();
 
                     // Process assigned chunk of vectors
                     for(size_t i = start_idx; i < end_idx; i++) {
@@ -1176,8 +1174,8 @@ public:
                 // Remove the filter
                 entry.vector_storage->deleteFilter(numeric_id, meta.filter);
                 // Mark as deleted in HNSW index
-                //XXX DONE ONLY FOR TESTING
-                // entry.alg->markDelete(numeric_id);
+
+                entry.alg->markDelete(numeric_id);
 
                 // Delete from sparse storage if hybrid index
                 if(entry.sparse_storage) {
@@ -1359,8 +1357,6 @@ public:
             // 2. Dense Search (Main Thread)
             std::vector<std::pair<float, ndd::idInt>> dense_results;
 
-            goto skip_dense;
-
             if(!query.empty()) {
                 // Convert query to bytes using the wrapper method
                 ndd::quant::QuantizationLevel quant_level = entry.alg->getQuantLevel();
@@ -1414,8 +1410,6 @@ public:
                     }
                 }
             }
-
-skip_dense:
 
             // 3. Get Sparse Results (Join)
             std::vector<std::pair<ndd::idInt, float>> sparse_results;
