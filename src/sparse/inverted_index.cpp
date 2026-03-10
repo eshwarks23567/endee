@@ -120,22 +120,23 @@ namespace ndd {
         const uint64_t parse_total_ns =
                 stats.parse_current_kv_total_ns.exchange(0, std::memory_order_relaxed);
 
-        std::cerr << "\n=== Sparse Search Debug Stats ===\n";
-        std::cerr << std::fixed << std::setprecision(3);
-        std::cerr << "phase3 iterators visited: " << visited << "\n";
-        std::cerr << "phase3 iterators contributed: " << contributed << "\n";
-        std::cerr << "phase3 contribution rate(%): "
-                  << (visited ? (100.0 * static_cast<double>(contributed) / static_cast<double>(visited))
-                              : 0.0)
-                  << "\n";
-        std::cerr << "parseCurrentKV count: " << parse_calls << "\n";
-        std::cerr << "parseCurrentKV total(ms): " << (static_cast<double>(parse_total_ns) / 1'000'000.0)
-                  << "\n";
-        std::cerr << "parseCurrentKV avg(us): "
-                  << (parse_calls ? (static_cast<double>(parse_total_ns) / 1000.0) / static_cast<double>(parse_calls)
-                                  : 0.0)
-                  << "\n";
-        std::cerr << "=================================\n";
+        LOG_INFO("Sparse search debug stats");
+        LOG_INFO("phase3 iterators visited: " << visited);
+        LOG_INFO("phase3 iterators contributed: " << contributed);
+        LOG_INFO("phase3 contribution rate(%): "
+                 << std::fixed << std::setprecision(3)
+                 << (visited ? (100.0 * static_cast<double>(contributed) / static_cast<double>(visited))
+                             : 0.0));
+        LOG_INFO("parseCurrentKV count: " << parse_calls);
+        LOG_INFO("parseCurrentKV total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(parse_total_ns) / 1'000'000.0));
+        LOG_INFO("parseCurrentKV avg(us): "
+                 << std::fixed << std::setprecision(3)
+                 << (parse_calls ? (static_cast<double>(parse_total_ns) / 1000.0)
+                                           / static_cast<double>(parse_calls)
+                                 : 0.0));
+        std::cout << "=================================\n";
     }
 
     void printSparseUpdateDebugStats() {
@@ -176,85 +177,90 @@ namespace ndd {
         const uint64_t recompute_max_total_ns =
                 stats.recompute_max_total_ns.exchange(0, std::memory_order_relaxed);
 
-        std::cerr << "\n=== Sparse Update Debug Stats ===\n";
-        std::cerr << std::fixed << std::setprecision(3);
-        std::cerr << "addDocumentsBatchInternal count: " << add_batch_calls << "\n";
-        std::cerr << "addDocumentsBatchInternal docs: " << add_batch_docs << "\n";
-        std::cerr << "addDocumentsBatchInternal terms: " << add_batch_terms << "\n";
-        std::cerr << "addDocumentsBatchInternal raw updates: " << add_batch_raw_updates << "\n";
-        std::cerr << "addDocumentsBatchInternal deduped updates: " << add_batch_deduped_updates << "\n";
-        std::cerr << "addDocumentsBatchInternal touched blocks: " << add_batch_blocks << "\n";
-        std::cerr << "term_updates build total(ms): "
-                  << (static_cast<double>(build_term_updates_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "sort+dedup total(ms): "
-                  << (static_cast<double>(sort_dedup_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "loadBlockEntries count: " << load_block_calls << "\n";
-        std::cerr << "loadBlockEntries total(ms): "
-                  << (static_cast<double>(load_block_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "loadBlockEntries avg(us): "
-                  << (load_block_calls
-                              ? (static_cast<double>(load_block_total_ns) / 1000.0)
-                                      / static_cast<double>(load_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "loadBlockEntries avg existing entries: "
-                  << (load_block_calls
-                              ? static_cast<double>(load_block_entries_total)
-                                      / static_cast<double>(load_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "merge blocks count: " << merge_block_calls << "\n";
-        std::cerr << "merge blocks total(ms): "
-                  << (static_cast<double>(merge_block_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "merge blocks avg(us): "
-                  << (merge_block_calls
-                              ? (static_cast<double>(merge_block_total_ns) / 1000.0)
-                                      / static_cast<double>(merge_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "merge avg existing entries: "
-                  << (merge_block_calls
-                              ? static_cast<double>(merge_existing_entries_total)
-                                      / static_cast<double>(merge_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "merge avg update entries: "
-                  << (merge_block_calls
-                              ? static_cast<double>(merge_update_entries_total)
-                                      / static_cast<double>(merge_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "merge avg output entries: "
-                  << (merge_block_calls
-                              ? static_cast<double>(merge_output_entries_total)
-                                      / static_cast<double>(merge_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "saveBlockEntries count: " << save_block_calls << "\n";
-        std::cerr << "saveBlockEntries total(ms): "
-                  << (static_cast<double>(save_block_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "saveBlockEntries avg(us): "
-                  << (save_block_calls
-                              ? (static_cast<double>(save_block_total_ns) / 1000.0)
-                                      / static_cast<double>(save_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "saveBlockEntries avg entries: "
-                  << (save_block_calls
-                              ? static_cast<double>(save_block_entries_total)
-                                      / static_cast<double>(save_block_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "recomputeGlobalMax count: " << recompute_max_calls << "\n";
-        std::cerr << "recomputeGlobalMax total(ms): "
-                  << (static_cast<double>(recompute_max_total_ns) / 1'000'000.0) << "\n";
-        std::cerr << "recomputeGlobalMax avg(us): "
-                  << (recompute_max_calls
-                              ? (static_cast<double>(recompute_max_total_ns) / 1000.0)
-                                      / static_cast<double>(recompute_max_calls)
-                              : 0.0)
-                  << "\n";
-        std::cerr << "=================================\n";
+        LOG_INFO("Sparse update debug stats");
+        LOG_INFO("addDocumentsBatchInternal count: " << add_batch_calls);
+        LOG_INFO("addDocumentsBatchInternal docs: " << add_batch_docs);
+        LOG_INFO("addDocumentsBatchInternal terms: " << add_batch_terms);
+        LOG_INFO("addDocumentsBatchInternal raw updates: " << add_batch_raw_updates);
+        LOG_INFO("addDocumentsBatchInternal deduped updates: " << add_batch_deduped_updates);
+        LOG_INFO("addDocumentsBatchInternal touched blocks: " << add_batch_blocks);
+        LOG_INFO("term_updates build total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(build_term_updates_total_ns) / 1'000'000.0));
+        LOG_INFO("sort+dedup total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(sort_dedup_total_ns) / 1'000'000.0));
+        LOG_INFO("loadBlockEntries count: " << load_block_calls);
+        LOG_INFO("loadBlockEntries total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(load_block_total_ns) / 1'000'000.0));
+        LOG_INFO("loadBlockEntries avg(us): "
+                 << std::fixed << std::setprecision(3)
+                 << (load_block_calls
+                             ? (static_cast<double>(load_block_total_ns) / 1000.0)
+                                       / static_cast<double>(load_block_calls)
+                             : 0.0));
+        LOG_INFO("loadBlockEntries avg existing entries: "
+                 << std::fixed << std::setprecision(3)
+                 << (load_block_calls
+                             ? static_cast<double>(load_block_entries_total)
+                                       / static_cast<double>(load_block_calls)
+                             : 0.0));
+        LOG_INFO("merge blocks count: " << merge_block_calls);
+        LOG_INFO("merge blocks total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(merge_block_total_ns) / 1'000'000.0));
+        LOG_INFO("merge blocks avg(us): "
+                 << std::fixed << std::setprecision(3)
+                 << (merge_block_calls
+                             ? (static_cast<double>(merge_block_total_ns) / 1000.0)
+                                       / static_cast<double>(merge_block_calls)
+                             : 0.0));
+        LOG_INFO("merge avg existing entries: "
+                 << std::fixed << std::setprecision(3)
+                 << (merge_block_calls
+                             ? static_cast<double>(merge_existing_entries_total)
+                                       / static_cast<double>(merge_block_calls)
+                             : 0.0));
+        LOG_INFO("merge avg update entries: "
+                 << std::fixed << std::setprecision(3)
+                 << (merge_block_calls
+                             ? static_cast<double>(merge_update_entries_total)
+                                       / static_cast<double>(merge_block_calls)
+                             : 0.0));
+        LOG_INFO("merge avg output entries: "
+                 << std::fixed << std::setprecision(3)
+                 << (merge_block_calls
+                             ? static_cast<double>(merge_output_entries_total)
+                                       / static_cast<double>(merge_block_calls)
+                             : 0.0));
+        LOG_INFO("saveBlockEntries count: " << save_block_calls);
+        LOG_INFO("saveBlockEntries total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(save_block_total_ns) / 1'000'000.0));
+        LOG_INFO("saveBlockEntries avg(us): "
+                 << std::fixed << std::setprecision(3)
+                 << (save_block_calls
+                             ? (static_cast<double>(save_block_total_ns) / 1000.0)
+                                       / static_cast<double>(save_block_calls)
+                             : 0.0));
+        LOG_INFO("saveBlockEntries avg entries: "
+                 << std::fixed << std::setprecision(3)
+                 << (save_block_calls
+                             ? static_cast<double>(save_block_entries_total)
+                                       / static_cast<double>(save_block_calls)
+                             : 0.0));
+        LOG_INFO("recomputeGlobalMax count: " << recompute_max_calls);
+        LOG_INFO("recomputeGlobalMax total(ms): "
+                 << std::fixed << std::setprecision(3)
+                 << (static_cast<double>(recompute_max_total_ns) / 1'000'000.0));
+        LOG_INFO("recomputeGlobalMax avg(us): "
+                 << std::fixed << std::setprecision(3)
+                 << (recompute_max_calls
+                             ? (static_cast<double>(recompute_max_total_ns) / 1000.0)
+                                       / static_cast<double>(recompute_max_calls)
+                             : 0.0));
+        std::cout << "=================================\n";
     }
 #else
     void printSparseSearchDebugStats() {}
@@ -290,16 +296,19 @@ namespace ndd {
             MDBX_stat stat;
             int rc = mdbx_dbi_stat(txn, blocked_term_postings_dbi_, &stat, sizeof(stat));
             if (rc == MDBX_SUCCESS && stat.ms_entries > 0) {
-                LOG_ERROR("[" << index_id_ << "] Sparse index database exists but has no superblock. "
-                          "This database was created by an older incompatible version.");
+                LOG_ERROR(2201,
+                          index_id_,
+                          "Sparse index database exists without a superblock; it was created by an older incompatible version");
                 throw std::runtime_error(
                     "Incompatible sparse index: database has no superblock (legacy format)");
             }
 
             // Fresh database — write the superblock.
             sb.format_version = settings::SPARSE_ONDISK_VERSION;
-            LOG_INFO("[" << index_id_ << "] Writing fresh sparse superblock (version="
-                     << (int)settings::SPARSE_ONDISK_VERSION << ")");
+            LOG_INFO(2202,
+                     index_id_,
+                     "Writing fresh sparse superblock (version="
+                             << static_cast<int>(settings::SPARSE_ONDISK_VERSION) << ")");
             if (!writeSuperBlock(txn, sb)) {
                 return false;
             }
@@ -307,9 +316,11 @@ namespace ndd {
         }
 
         if (sb.format_version != settings::SPARSE_ONDISK_VERSION) {
-            LOG_ERROR("[" << index_id_ << "] Sparse index format version mismatch: on-disk="
-                      << (int)sb.format_version
-                      << " compiled=" << (int)settings::SPARSE_ONDISK_VERSION);
+            LOG_ERROR(2203,
+                      index_id_,
+                      "Sparse index format version mismatch: on-disk="
+                              << static_cast<int>(sb.format_version)
+                              << " compiled=" << static_cast<int>(settings::SPARSE_ONDISK_VERSION));
             throw std::runtime_error(
                 "Incompatible sparse index: format version "
                 + std::to_string(sb.format_version)
@@ -326,7 +337,7 @@ namespace ndd {
         MDBX_txn* txn = nullptr;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to begin init transaction: " << mdbx_strerror(rc));
+            LOG_ERROR(2204, index_id_, "Failed to begin sparse index init transaction: " << mdbx_strerror(rc));
             return false;
         }
 
@@ -335,7 +346,7 @@ namespace ndd {
                             MDBX_CREATE | MDBX_INTEGERKEY,
                             &blocked_term_postings_dbi_);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to open blocked_term_postings dbi: " << mdbx_strerror(rc));
+            LOG_ERROR(2205, index_id_, "Failed to open blocked_term_postings DBI: " << mdbx_strerror(rc));
             mdbx_txn_abort(txn);
             return false;
         }
@@ -347,7 +358,7 @@ namespace ndd {
 
         rc = mdbx_txn_commit(txn);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to commit init transaction: " << mdbx_strerror(rc));
+            LOG_ERROR(2206, index_id_, "Failed to commit sparse index init transaction: " << mdbx_strerror(rc));
             return false;
         }
 
@@ -355,7 +366,7 @@ namespace ndd {
             return false;
         }
 
-        LOG_INFO("[" << index_id_ << "] Sparse index initialized: " << term_info_.size() << " terms loaded");
+        LOG_INFO(2207, index_id_, "Sparse index initialized with " << term_info_.size() << " loaded terms");
         return true;
     }
 
@@ -464,7 +475,7 @@ namespace ndd {
         MDBX_txn* txn = nullptr;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to begin search transaction: " << mdbx_strerror(rc));
+            LOG_ERROR(2208, index_id_, "Failed to begin sparse search transaction: " << mdbx_strerror(rc));
             return {};
         }
 
@@ -496,7 +507,7 @@ namespace ndd {
 
             auto info_it = term_info_.find(term_id);
             if (info_it == term_info_.end()) {
-                LOG_WARN("[" << index_id_ << "] search: query term_id=" << term_id << " not in term_info_, skipping");
+                LOG_WARN(2209, index_id_, "Search skipped unknown query term_id=" << term_id);
                 continue;
             }
 
@@ -509,8 +520,10 @@ namespace ndd {
             MDBX_cursor* cursor = nullptr;
             rc = mdbx_cursor_open(txn, blocked_term_postings_dbi_, &cursor);
             if (rc != MDBX_SUCCESS) {
-                LOG_ERROR("[" << index_id_ << "] search: mdbx_cursor_open failed for term " << term_id
-                          << ": " << mdbx_strerror(rc));
+                LOG_ERROR(2210,
+                          index_id_,
+                          "Failed to open sparse search cursor for term "
+                                  << term_id << ": " << mdbx_strerror(rc));
                 continue;
             }
 
@@ -675,9 +688,11 @@ namespace ndd {
 
 #ifdef NDD_INV_IDX_PRUNE_DEBUG
         for (const PostingListIterator& it : iters_storage) {
-            LOG_INFO("sparse_prune term_id=" << it.term_id
-                    << " posting_list_len=" << it.initial_entries
-                    << " pruned_len=" << it.pruned_entries);
+            LOG_INFO(2229,
+                     index_id_,
+                     "Sparse prune stats: term_id=" << it.term_id
+                                                   << " posting_list_len=" << it.initial_entries
+                                                   << " pruned_len=" << it.pruned_entries);
         }
 #endif // NDD_INV_IDX_PRUNE_DEBUG
 
@@ -902,11 +917,11 @@ namespace ndd {
             return true;
         }
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] readSuperBlock mdbx_get failed: " << mdbx_strerror(rc));
+            LOG_ERROR(2211, index_id_, "readSuperBlock MDBX lookup failed: " << mdbx_strerror(rc));
             return false;
         }
         if (data.iov_len < sizeof(SuperBlock)) {
-            LOG_ERROR("[" << index_id_ << "] readSuperBlock: corrupt superblock (too small)");
+            LOG_ERROR(2212, index_id_, "Corrupt sparse superblock: payload too small");
             return false;
         }
 
@@ -922,7 +937,7 @@ namespace ndd {
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &data, MDBX_UPSERT);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] writeSuperBlock mdbx_put failed: " << mdbx_strerror(rc));
+            LOG_ERROR(2213, index_id_, "writeSuperBlock MDBX put failed: " << mdbx_strerror(rc));
             return false;
         }
         return true;
@@ -959,7 +974,7 @@ namespace ndd {
                                             uint32_t term_id,
                                             const PostingListHeader& header) {
         if (term_id == kMetadataTermId) {
-            LOG_ERROR("[" << index_id_ << "] Refusing to write posting-list header for reserved metadata term");
+            LOG_ERROR(2214, index_id_, "Refusing to write a posting-list header for the reserved metadata term");
             return false;
         }
 
@@ -969,8 +984,10 @@ namespace ndd {
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &data, MDBX_UPSERT);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to write posting-list header for term " << term_id
-                        << ": " << mdbx_strerror(rc));
+            LOG_ERROR(2215,
+                      index_id_,
+                      "Failed to write posting-list header for term "
+                              << term_id << ": " << mdbx_strerror(rc));
             return false;
         }
 
@@ -1013,7 +1030,7 @@ namespace ndd {
 #endif // NDD_INV_IDX_STORE_FLOATS
 
         if (data.iov_len < required) {
-            LOG_ERROR("[" << index_id_ << "] data is corrupt. Not enough bytes as expected");
+            LOG_ERROR(2216, index_id_, "Corrupt sparse block payload: fewer bytes than expected");
             return false;
         }
 
@@ -1051,15 +1068,16 @@ namespace ndd {
             return true;
         }
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] loadBlockEntries mdbx_get failed for term " << term_id
-                        << " block " << block_nr << ": " << mdbx_strerror(rc));
+            LOG_ERROR(2217,
+                      index_id_,
+                      "loadBlockEntries MDBX lookup failed for term "
+                              << term_id << " block " << block_nr << ": " << mdbx_strerror(rc));
             return false;
         }
 
         BlockView view;
         if (!parseBlockViewFromValue(data, block_nr, &view)) {
-            LOG_ERROR("[" << index_id_ << "] Corrupt block payload for term " << term_id
-                        << " block " << block_nr);
+            LOG_ERROR(2218, index_id_, "Corrupt block payload for term " << term_id << " block " << block_nr);
             return false;
         }
 
@@ -1104,7 +1122,7 @@ namespace ndd {
                                         float max_val)
     {
         if (term_id == kMetadataTermId || block_nr == kMetadataBlockNr) {
-            LOG_ERROR("[" << index_id_ << "] saveBlockEntries: Refusing to save reserved metadata key as a data block");
+            LOG_ERROR(2219, index_id_, "Refusing to save a reserved metadata key as a sparse data block");
             return false;
         }
 
@@ -1113,8 +1131,10 @@ namespace ndd {
         }
 
         if (entries.size() > kBlockCapacity) {
-            LOG_ERROR("[" << index_id_ << "] Block for term " << term_id << " block " << block_nr
-                        << " exceeds fixed capacity " << kBlockCapacity);
+            LOG_ERROR(2220,
+                      index_id_,
+                      "Block for term " << term_id << " block " << block_nr
+                                        << " exceeds fixed capacity " << kBlockCapacity);
             return false;
         }
 
@@ -1145,15 +1165,16 @@ namespace ndd {
         bool has_prev = false;
         for (size_t i = 0; i < entries.size(); i++) {
             if (docToBlockNr(entries[i].doc_id) != block_nr) {
-                LOG_ERROR("[" << index_id_ << "] Entry doc_id " << entries[i].doc_id
-                            << " does not belong to term " << term_id
-                            << " block " << block_nr);
+                LOG_ERROR(2221,
+                          index_id_,
+                          "Entry doc_id " << entries[i].doc_id << " does not belong to term "
+                                          << term_id << " block " << block_nr);
                 return false;
             }
 
             BlockOffset offset = docToBlockOffset(entries[i].doc_id);
             if (has_prev && offset <= prev_offset) {
-                LOG_ERROR("[" << index_id_ << "] Block entries must be strictly sorted by doc offset");
+                LOG_ERROR(2222, index_id_, "Block entries must be strictly sorted by doc offset");
                 return false;
             }
             offsets_out[i] = offset;
@@ -1179,8 +1200,10 @@ namespace ndd {
 
         int rc = mdbx_put(txn, blocked_term_postings_dbi_, &key, &value, MDBX_UPSERT);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] saveBlockEntries mdbx_put failed for term " << term_id
-                        << " block " << block_nr << ": " << mdbx_strerror(rc));
+            LOG_ERROR(2223,
+                      index_id_,
+                      "saveBlockEntries MDBX put failed for term "
+                              << term_id << " block " << block_nr << ": " << mdbx_strerror(rc));
             return false;
         }
 
@@ -1278,7 +1301,7 @@ namespace ndd {
         MDBX_txn* txn = nullptr;
         int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
         if (rc != MDBX_SUCCESS) {
-            LOG_ERROR("[" << index_id_ << "] Failed to begin transaction for loadTermInfo: " << mdbx_strerror(rc));
+            LOG_ERROR(2224, index_id_, "Failed to begin loadTermInfo transaction: " << mdbx_strerror(rc));
             return false;
         }
 
@@ -1316,7 +1339,7 @@ namespace ndd {
 
         mdbx_cursor_close(cursor);
         mdbx_txn_abort(txn);
-        LOG_INFO("[" << index_id_ << "] loadTermInfo: loaded " << term_info_.size() << " active terms");
+        LOG_INFO(2225, index_id_, "loadTermInfo loaded " << term_info_.size() << " active terms");
         return true;
     }
 
@@ -1349,7 +1372,7 @@ namespace ndd {
             for (size_t i = 0; i < sparse_vec.indices.size(); i++) {
                 uint32_t term_id = sparse_vec.indices[i];
                 if (term_id == kMetadataTermId) {
-                    LOG_ERROR("[" << index_id_ << "] term_id UINT32_MAX is reserved for sparse metadata");
+                    LOG_ERROR(2226, index_id_, "term_id UINT32_MAX is reserved for sparse metadata");
                     return false;
                 }
                 term_updates[term_id].push_back(std::make_pair(doc_id, sparse_vec.values[i]));
@@ -1481,11 +1504,16 @@ namespace ndd {
                         new_live_in_block++;
                         if (e.value > new_block_max) new_block_max = e.value;
                     } else if (e.value == 0.0f) {
-                        LOG_WARN("[" << index_id_ << "] addDocumentsBatch: zero value for term " << term_id
-                                 << ", entry will be treated as deleted");
+                        LOG_WARN(2227,
+                                 index_id_,
+                                 "addDocumentsBatch received zero value for term "
+                                         << term_id << "; entry will be treated as deleted");
                     } else {
-                        LOG_WARN("[" << index_id_ << "] addDocumentsBatch: negative value " << e.value
-                                 << " for term " << term_id << ", treating as dead");
+                        LOG_WARN(2228,
+                                 index_id_,
+                                 "addDocumentsBatch received negative value " << e.value
+                                                                              << " for term " << term_id
+                                                                              << "; treating as dead");
                     }
                 }
 

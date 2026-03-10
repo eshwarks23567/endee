@@ -54,7 +54,7 @@ namespace ndd {
                     values[i] = fp16_to_float(fp16_values[i]);
                 }
             } else {
-                LOG_WARN("SparseVector: deserialized vector with nr_nonzero=0");
+                LOG_WARN(2261, "Deserialized sparse vector with nr_nonzero=0");
             }
         }
 

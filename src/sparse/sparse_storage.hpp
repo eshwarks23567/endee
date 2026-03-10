@@ -38,8 +38,9 @@ namespace ndd {
             }
 
             updateVectorCount();
-            LOG_INFO("[" << index_id_ << "] SparseVectorStorage initialized at " << db_path_
-                     << " with " << vector_count_ << " vectors");
+            LOG_INFO(2241,
+                     index_id_,
+                     "SparseVectorStorage initialized at " << db_path_ << " with " << vector_count_ << " vectors");
             return true;
         }
 
@@ -122,7 +123,7 @@ namespace ndd {
                 // terms from the inverted index, then delete the raw payload row.
                 auto vec = get_vector(doc_id);
                 if(!vec) {
-                    LOG_WARN("[" << storage_->index_id_ << "] delete_vector: doc_id=" << doc_id << " not found");
+                    LOG_WARN(2242, storage_->index_id_, "delete_vector could not find doc_id=" << doc_id);
                     return false;
                 }
 
@@ -170,14 +171,17 @@ namespace ndd {
 
             for(const auto& [doc_id, sparse_vec] : batch) {
                 if(!storeVectorInternal(txn->getTxn(), doc_id, sparse_vec)) {
-                    LOG_ERROR("[" << index_id_ << "] store_vectors_batch: storeVectorInternal failed for doc_id=" << doc_id);
+                    LOG_ERROR(2243, index_id_, "store_vectors_batch failed to store doc_id=" << doc_id);
                     txn->abort();
                     return false;
                 }
             }
 
             if(!sparse_index_->addDocumentsBatch(txn->getTxn(), batch)) {
-                LOG_ERROR("[" << index_id_ << "] store_vectors_batch: addDocumentsBatch failed for batch of " << batch.size());
+                LOG_ERROR(2244,
+                          index_id_,
+                          "store_vectors_batch failed to update the inverted index for batch size "
+                                  << batch.size());
                 txn->abort();
                 return false;
             }
@@ -237,28 +241,28 @@ namespace ndd {
         bool initializeMDBX() {
             int rc = mdbx_env_create(&env_);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_env_create failed: " << rc);
+                LOG_ERROR(2245, index_id_, "mdbx_env_create failed: " << mdbx_strerror(rc));
                 return false;
             }
 
             // Set geometry (max 1TB for now, can be configured)
             rc = mdbx_env_set_geometry(env_, -1, -1, TB, -1, -1, -1);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_env_set_geometry failed: " << rc);
+                LOG_ERROR(2246, index_id_, "mdbx_env_set_geometry failed: " << mdbx_strerror(rc));
                 return false;
             }
 
             // Set maxdbs to allow named databases
             rc = mdbx_env_set_maxdbs(env_, 10);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_env_set_maxdbs failed: " << rc);
+                LOG_ERROR(2247, index_id_, "mdbx_env_set_maxdbs failed: " << mdbx_strerror(rc));
                 return false;
             }
 
             std::error_code ec;
             std::filesystem::create_directories(db_path_, ec);
             if(ec) {
-                LOG_ERROR("[" << index_id_ << "] create_directories failed: " << ec.message());
+                LOG_ERROR(2248, index_id_, "create_directories failed for " << db_path_ << ": " << ec.message());
                 return false;
             }
 
@@ -267,27 +271,29 @@ namespace ndd {
                                MDBX_NOSTICKYTHREADS | MDBX_NORDAHEAD | MDBX_LIFORECLAIM,
                                0664);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_env_open failed: " << rc << " path: " << db_path_);
+                LOG_ERROR(2249,
+                          index_id_,
+                          "mdbx_env_open failed for " << db_path_ << ": " << mdbx_strerror(rc));
                 return false;
             }
 
             MDBX_txn* txn;
             rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_txn_begin failed: " << rc);
+                LOG_ERROR(2250, index_id_, "mdbx_txn_begin failed: " << mdbx_strerror(rc));
                 return false;
             }
 
             rc = mdbx_dbi_open(txn, "sparse_docs", MDBX_CREATE | MDBX_INTEGERKEY, &docs_dbi_);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_dbi_open failed: " << rc);
+                LOG_ERROR(2251, index_id_, "mdbx_dbi_open failed for sparse_docs: " << mdbx_strerror(rc));
                 mdbx_txn_abort(txn);
                 return false;
             }
 
             rc = mdbx_txn_commit(txn);
             if(rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] mdbx_txn_commit failed: " << rc);
+                LOG_ERROR(2252, index_id_, "mdbx_txn_commit failed: " << mdbx_strerror(rc));
                 return false;
             }
             return true;
@@ -310,8 +316,10 @@ namespace ndd {
 
             int rc = mdbx_put(txn, docs_dbi_, &key, &data, MDBX_UPSERT);
             if (rc != 0) {
-                LOG_ERROR("[" << index_id_ << "] storeVectorInternal: mdbx_put failed for doc_id=" << doc_id
-                          << ": " << mdbx_strerror(rc));
+                LOG_ERROR(2253,
+                          index_id_,
+                          "storeVectorInternal MDBX put failed for doc_id="
+                                  << doc_id << ": " << mdbx_strerror(rc));
             }
             return rc == 0;
         }
@@ -334,8 +342,10 @@ namespace ndd {
             key.iov_len = sizeof(ndd::idInt);
             int rc = mdbx_del(txn, docs_dbi_, &key, nullptr);
             if (rc != 0 && rc != MDBX_NOTFOUND) {
-                LOG_ERROR("[" << index_id_ << "] deleteVectorInternal: mdbx_del failed for doc_id=" << doc_id
-                          << ": " << mdbx_strerror(rc));
+                LOG_ERROR(2254,
+                          index_id_,
+                          "deleteVectorInternal MDBX delete failed for doc_id="
+                                  << doc_id << ": " << mdbx_strerror(rc));
             }
             return rc == 0;
         }
@@ -353,4 +363,3 @@ namespace ndd {
     };
 
 }  // namespace ndd
-
