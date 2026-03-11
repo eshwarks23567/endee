@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/endee-io/endee/raw/master/docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/endee-io/endee/raw/master/docs/assets/logo-light.svg">
-      <img height="100" alt="Endee" src="https://github.com/endee-io/endee/raw/master/docs/assets/logo-light.svg">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
+      <img height="100" alt="Endee" src="docs/assets/logo-light.svg">
   </picture>
 </p>
 
