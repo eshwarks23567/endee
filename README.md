@@ -1,3 +1,22 @@
+<p align="center">
+  <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/endee-io/endee/raw/master/docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="https://github.com/endee-io/endee/raw/master/docs/assets/logo-light.svg">
+      <img height="100" alt="Endee" src="https://github.com/endee-io/endee/raw/master/docs/assets/logo-light.svg">
+  </picture>
+</p>
+
+<p align="center">
+    <a href="https://docs.endee.io/quick-start"><img src="https://img.shields.io/badge/Docs-Quick_Start-success?style=flat-square" alt="Docs"></a>
+    <a href="https://github.com/endee-io/endee/blob/master/LICENSE"><img src="https://img.shields.io/github/license/endee-io/endee?style=flat-square" alt="License"></a>
+    <a href="mailto:enterprise@endee.io"><img src="https://img.shields.io/badge/Chat-Contact_Us-0A66C2?style=flat-square" alt="Chat"></a>
+    <a href="https://endee.io/"><img src="https://img.shields.io/badge/Website-Endee-111111?style=flat-square" alt="Website"></a>
+    <!-- <a href="https://github.com/endee-io/endee/actions"><img src="https://img.shields.io/github/actions/workflow/status/endee-io/endee/ci.yml?style=flat-square" alt="Tests status"></a> -->
+    <!-- <a href="https://github.com/endee-io/endee/releases"><img src="https://img.shields.io/github/v/release/endee-io/endee?style=flat-square" alt="Latest release"></a> -->
+    <!-- <a href="https://hub.docker.com/"><img src="https://img.shields.io/badge/Docker-Coming_Soon-2496ED?style=flat-square" alt="Docker"></a> -->
+</p>
+
+
 # Endee: High-Performance Open Source Vector Database
 
 **Endee (nD)** is a specialized, high-performance vector database built for speed and efficiency. This guide covers supported platforms, dependency requirements, and detailed build instructions using both our automated installer and manual CMake configuration.
