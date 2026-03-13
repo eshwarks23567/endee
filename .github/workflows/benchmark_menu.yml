@@ -20,7 +20,7 @@ on:
   workflow_run:
     workflows: [ Continuous Integration ]
     types: [ completed ]
-    branches: [ feature/continuous_integration ]
+    branches: [ feature/ci_main ]
 
 permissions:
   contents: read

@@ -11,7 +11,7 @@ on:
   #   branches: [ base_ci ]
   # PULL REQUEST EVENT
   pull_request:
-    branches: [ feature/continuous_integration ]
+    branches: [ feature/ci_main ]
 
   
 # ========== JOBS ==========
