@@ -1,4 +1,4 @@
-# 🔬 Endee Research Assistant
+# Endee Research Assistant
 
 > A production-ready semantic search and RAG (Retrieval Augmented Generation) system for research papers, powered by the **Endee vector database**.
 
@@ -9,7 +9,7 @@
 
 ---
 
-## 📋 Project Overview
+## Project Overview
 
 ### Problem Statement
 
@@ -29,7 +29,7 @@ Researchers face a significant challenge: **finding relevant papers in the ever-
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -59,7 +59,7 @@ Researchers face a significant challenge: **finding relevant papers in the ever-
 
 ---
 
-## 🚀 How Endee is Used
+## How Endee is Used
 
 Endee serves as the **core vector storage and retrieval engine**:
 
@@ -114,7 +114,7 @@ results = index.query(
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 endee-research-assistant/
@@ -143,7 +143,7 @@ endee-research-assistant/
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -181,7 +181,7 @@ streamlit run src/app.py
 
 ---
 
-## 🎯 Features Demo
+## Features Demo
 
 ### 1. Semantic Paper Search
 
@@ -198,7 +198,7 @@ results = search.find_papers(
 )
 
 for paper in results:
-    print(f"📄 {paper['title']} (Score: {paper['score']:.3f})")
+    print(f"- {paper['title']} (Score: {paper['score']:.3f})")
 ```
 
 ### 2. RAG-Powered Q&A
@@ -219,7 +219,7 @@ print(f"Sources: {[p['title'] for p in answer['sources']]}")
 
 ---
 
-## 📊 Performance Benchmarks
+## Performance Benchmarks
 
 Tested on a dataset of **50,000 arXiv papers**:
 
@@ -233,7 +233,7 @@ Tested on a dataset of **50,000 arXiv papers**:
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run all tests
@@ -245,7 +245,7 @@ pytest tests/ --cov=src --cov-report=html
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -257,7 +257,7 @@ pytest tests/ --cov=src --cov-report=html
 
 ---
 
-## 🚀 Deployment
+## Deployment
 
 ### Docker Compose (Recommended)
 
@@ -269,19 +269,19 @@ Access the application at `http://localhost:8501`
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please read our contributing guidelines and submit PRs.
 
 ---
 
-## 📝 License
+## License
 
 This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-## 👤 Author
+## Author
 
 **[Your Name]**
 
@@ -291,9 +291,9 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) for deta
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [Endee](https://endee.io) - High-performance vector database
 - [arXiv](https://arxiv.org) - Research paper repository
 - [Sentence-BERT](https://sbert.net) - Text embeddings
-- [OpenAI](https://openai.com) - LLM for RAG
+- [Google Gemini](https://deepmind.google/technologies/gemini/) - LLM for RAG
