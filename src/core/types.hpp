@@ -11,30 +11,40 @@
 namespace ndd {
 
     enum class SparseScoringModel : uint8_t {
-        DEFAULT = 0,
-        ENDEE_BM25_SERVER_IDF = 1,
+        NONE = 0,
+        DEFAULT = 1,
+        ENDEE_BM25 = 2,
     };
 
     inline const char* sparseScoringModelToString(SparseScoringModel model) {
         switch(model) {
+            case SparseScoringModel::NONE:
+                return "None";
             case SparseScoringModel::DEFAULT:
                 return "default";
-            case SparseScoringModel::ENDEE_BM25_SERVER_IDF:
-                return "endee_bm25_server_idf";
+            case SparseScoringModel::ENDEE_BM25:
+                return "endee_bm25";
         }
-        return "default";
+        return "None";
     }
 
     inline std::optional<SparseScoringModel> sparseScoringModelFromString(
         const std::string& value)
     {
+        if(value == "None") {
+            return SparseScoringModel::NONE;
+        }
         if(value == "default") {
             return SparseScoringModel::DEFAULT;
         }
-        if(value == "endee_bm25_server_idf") {
-            return SparseScoringModel::ENDEE_BM25_SERVER_IDF;
+        if(value == "endee_bm25") {
+            return SparseScoringModel::ENDEE_BM25;
         }
         return std::nullopt;
+    }
+
+    inline bool sparseModelEnabled(SparseScoringModel model) {
+        return model != SparseScoringModel::NONE;
     }
 
     struct FilterParams {

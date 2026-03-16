@@ -17,7 +17,7 @@
 struct IndexMetadata {
     std::string name;  // Just the index name, not the full path
     size_t dimension;
-    size_t sparse_dim = 0;  // Added sparse dimension
+    ndd::SparseScoringModel sparse_model = ndd::SparseScoringModel::NONE;
     std::string space_type_str;
     ndd::quant::QuantizationLevel quant_level =
             ndd::quant::QuantizationLevel::INT8;  // Selected quantization level
@@ -26,32 +26,35 @@ struct IndexMetadata {
     size_t M;
     size_t ef_con;
     std::chrono::system_clock::time_point created_at;
-    ndd::SparseScoringModel sparse_scoring_model = ndd::SparseScoringModel::DEFAULT;
 
     nlohmann::json to_json() const {
         return {{"name", name},
                 {"dimension", dimension},
-                {"sparse_dim", sparse_dim},
+                {"sparse_model", ndd::sparseScoringModelToString(sparse_model)},
                 {"space_type_str", space_type_str},
                 {"quant_level", static_cast<uint8_t>(quant_level)},
                 {"checksum", checksum},
                 {"total_elements", total_elements},
                 {"M", M},
                 {"ef_con", ef_con},
-                {"created_at", std::chrono::system_clock::to_time_t(created_at)},
-                {"sparse_scoring_model",
-                 ndd::sparseScoringModelToString(sparse_scoring_model)}};
+                {"created_at", std::chrono::system_clock::to_time_t(created_at)}};
     }
 
     static IndexMetadata from_json(const nlohmann::json& j) {
         IndexMetadata meta;
         meta.name = j["name"].get<std::string>();
         meta.dimension = j["dimension"].get<size_t>();
-        if(j.contains("sparse_dim")) {
-            meta.sparse_dim = j["sparse_dim"].get<size_t>();
-        } else {
-            meta.sparse_dim = 0;
+        if(!j.contains("sparse_model")) {
+            throw std::runtime_error(
+                    "Incompatible index metadata: missing sparse_model. Recreate the index.");
         }
+        const auto sparse_model =
+                ndd::sparseScoringModelFromString(j["sparse_model"].get<std::string>());
+        if(!sparse_model.has_value()) {
+            throw std::runtime_error(
+                    "Incompatible index metadata: invalid sparse_model. Recreate the index.");
+        }
+        meta.sparse_model = *sparse_model;
         meta.space_type_str = j["space_type_str"].get<std::string>();
         meta.quant_level =
                 static_cast<ndd::quant::QuantizationLevel>(j["quant_level"].get<uint8_t>());
@@ -60,14 +63,6 @@ struct IndexMetadata {
         meta.M = j["M"].get<size_t>();
         meta.ef_con = j["ef_con"].get<size_t>();
         meta.created_at = std::chrono::system_clock::from_time_t(j["created_at"].get<time_t>());
-        if(j.contains("sparse_scoring_model")) {
-            const auto sparse_scoring_model = ndd::sparseScoringModelFromString(
-                j["sparse_scoring_model"].get<std::string>());
-            meta.sparse_scoring_model = sparse_scoring_model.value_or(
-                ndd::SparseScoringModel::DEFAULT);
-        } else {
-            meta.sparse_scoring_model = ndd::SparseScoringModel::DEFAULT;
-        }
         return meta;
     }
 };

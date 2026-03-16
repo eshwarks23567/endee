@@ -22,11 +22,11 @@ namespace ndd {
     public:
         SparseVectorStorage(const std::string& db_path,
                             const std::string& index_id,
-                            ndd::SparseScoringModel sparse_scoring_model =
+                            ndd::SparseScoringModel sparse_model =
                                 ndd::SparseScoringModel::DEFAULT) :
             db_path_(db_path),
             index_id_(index_id),
-            sparse_scoring_model_(sparse_scoring_model),
+            sparse_model_(sparse_model),
             env_(nullptr) {
             sparse_index_ = nullptr;
         }
@@ -40,7 +40,7 @@ namespace ndd {
             }
 
             sparse_index_ =
-                std::make_unique<InvertedIndex>(env_, 0, index_id_, sparse_scoring_model_);
+                std::make_unique<InvertedIndex>(env_, 0, index_id_, sparse_model_);
             if(!sparse_index_->initialize()) {
                 return false;
             }
@@ -252,7 +252,7 @@ namespace ndd {
     private:
         std::string db_path_;
         std::string index_id_;
-        ndd::SparseScoringModel sparse_scoring_model_;
+        ndd::SparseScoringModel sparse_model_;
         MDBX_env* env_;
         MDBX_dbi docs_dbi_;
 

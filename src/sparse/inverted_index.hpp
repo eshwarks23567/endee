@@ -83,7 +83,7 @@ namespace ndd {
         InvertedIndex(MDBX_env* env,
                       size_t vocab_size,
                       const std::string& index_id,
-                      ndd::SparseScoringModel sparse_scoring_model =
+                      ndd::SparseScoringModel sparse_model =
                           ndd::SparseScoringModel::DEFAULT);
         ~InvertedIndex() = default;
 
@@ -113,7 +113,7 @@ namespace ndd {
         MDBX_dbi blocked_term_postings_dbi_;
         size_t vocab_size_;
         std::string index_id_;
-        ndd::SparseScoringModel sparse_scoring_model_;
+        ndd::SparseScoringModel sparse_model_;
 
         // Cached per-term max values loaded from posting-list metadata. Search uses this
         // to skip absent terms quickly and to compute pruning bounds.

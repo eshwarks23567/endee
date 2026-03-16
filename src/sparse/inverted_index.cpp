@@ -270,12 +270,12 @@ namespace ndd {
     InvertedIndex::InvertedIndex(MDBX_env* env,
                                  size_t vocab_size,
                                  const std::string& index_id,
-                                 ndd::SparseScoringModel sparse_scoring_model)
+                                 ndd::SparseScoringModel sparse_model)
         : env_(env),
           blocked_term_postings_dbi_(0),
           vocab_size_(vocab_size),
           index_id_(index_id),
-          sparse_scoring_model_(sparse_scoring_model) {}
+          sparse_model_(sparse_model) {}
 
     void InvertedIndex::applyHeaderDelta(PostingListHeader& header,
                                         int64_t total_delta,
@@ -565,7 +565,7 @@ namespace ndd {
             }
 
             float term_weight = qw;
-            if (sparse_scoring_model_ == ndd::SparseScoringModel::ENDEE_BM25_SERVER_IDF) {
+            if (sparse_model_ == ndd::SparseScoringModel::ENDEE_BM25) {
                 term_weight *= get_IDF(total_nr_docs, header.nr_live_entries);
             }
 
