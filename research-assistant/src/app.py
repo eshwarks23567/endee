@@ -1,8 +1,8 @@
 """
 Endee Research Assistant - Streamlit Web Application
 
-A beautiful, interactive UI for semantic search and RAG-powered Q&A
-on research papers using Endee vector database.
+A clean, structured interface for semantic search and RAG-powered analysis
+on research papers using the Endee vector database.
 """
 
 import streamlit as st
@@ -16,154 +16,195 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Page configuration
 st.set_page_config(
     page_title="Endee Research Assistant",
-    page_icon="🔬",
+    page_icon="🧊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for beautiful styling
+# Custom CSS for a premium, intentional design system
 st.markdown("""
 <style>
-    /* Main container styling */
+    /* Typography System - Inter (sans-serif) */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+        color: #0f172a; /* Slate 900 */
+    }
+
+    /* 8-Point Spacing Rhythm System */
     .main {
-        padding: 2rem;
+        padding: 48px 40px; 
     }
     
-    /* Header styling */
+    /* Header styling - Clean, grounded, hierarchy-driven */
     .header-container {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 16px;
-        margin-bottom: 2rem;
-        color: white;
-        text-align: center;
+        padding: 0 0 40px 0;
+        margin-bottom: 40px;
+        border-bottom: 1px solid #e2e8f0; /* Slate 200 */
     }
     
     .header-title {
-        font-size: 2.5rem;
+        font-size: 32px;
         font-weight: 700;
-        margin-bottom: 0.5rem;
+        letter-spacing: -0.02em;
+        color: #0f172a;
+        margin-bottom: 8px;
     }
     
     .header-subtitle {
-        font-size: 1.1rem;
-        opacity: 0.9;
+        font-size: 16px;
+        font-weight: 400;
+        color: #64748b; /* Slate 500 */
+        line-height: 1.5;
     }
     
-    /* Card styling */
+    /* Card Component System - shared radius, padding, and border */
     .result-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        border-left: 4px solid #667eea;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 24px;
+        margin-bottom: 16px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    
+    .result-card:hover {
+        border-color: #cbd5e1; /* Slate 300 */
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05); /* Tailwind shadow-md */
     }
     
     .result-title {
-        font-size: 1.1rem;
+        font-size: 18px;
         font-weight: 600;
-        color: #1a1a2e;
-        margin-bottom: 0.5rem;
+        color: #0f172a;
+        margin-bottom: 8px;
+        line-height: 1.4;
     }
     
     .result-meta {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 0.75rem;
+        font-size: 14px;
+        color: #64748b;
+        margin-bottom: 16px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
     
     .result-abstract {
-        font-size: 0.95rem;
-        color: #444;
+        font-size: 14px;
+        color: #334155; /* Slate 700 */
         line-height: 1.6;
     }
     
     .score-badge {
         display: inline-block;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 600;
+        background: #f1f5f9; /* Slate 100 */
+        color: #475569; /* Slate 600 */
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        border: 1px solid #e2e8f0;
     }
     
-    /* Stats cards */
+    /* Stats Layout System */
     .stats-container {
         display: flex;
-        gap: 1rem;
-        margin-bottom: 2rem;
+        gap: 24px;
+        margin-bottom: 32px;
     }
     
     .stat-card {
         flex: 1;
-        background: white;
-        border-radius: 12px;
-        padding: 1.25rem;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 24px;
     }
     
     .stat-value {
-        font-size: 2rem;
+        font-size: 32px;
         font-weight: 700;
-        color: #667eea;
+        color: #0f172a;
+        letter-spacing: -0.02em;
     }
     
     .stat-label {
-        font-size: 0.85rem;
-        color: #666;
-        margin-top: 0.25rem;
+        font-size: 14px;
+        font-weight: 500;
+        color: #64748b;
+        margin-top: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
     
-    /* Sidebar styling */
-    .sidebar .sidebar-content {
-        background: #f8f9fa;
-    }
+    /* Streamlit Overrides for Consistent UI Forms */
     
-    /* Button styling */
+    /* Primary Buttons */
     .stButton>button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        padding: 0.75rem 2rem;
-        border-radius: 8px;
-        font-weight: 600;
-        transition: transform 0.2s, box-shadow 0.2s;
+        background-color: #0f172a !important; /* Slate 900 */
+        color: #ffffff !important;
+        border: 1px solid #0f172a !important;
+        padding: 8px 16px !important;
+        border-radius: 6px !important;
+        font-weight: 500 !important;
+        font-size: 14px !important;
+        min-height: 40px !important;
+        transition: background-color 0.15s ease !important;
+        box-shadow: none !important;
     }
     
     .stButton>button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        background-color: #334155 !important; /* Slate 700 */
+        border-color: #334155 !important;
+        transform: none !important; /* Remove jumpy hover */
     }
     
-    /* Input styling */
+    /* Inputs */
     .stTextInput>div>div>input {
-        border-radius: 8px;
-        border: 2px solid #e0e0e0;
-        padding: 0.75rem;
+        border-radius: 6px !important;
+        border: 1px solid #cbd5e1 !important; /* Slate 300 */
+        padding: 10px 12px !important;
+        font-size: 14px !important;
+        background-color: #ffffff !important;
+        color: #0f172a !important;
+        box-shadow: none !important;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
     }
     
     .stTextInput>div>div>input:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        border-color: #3b82f6 !important; /* Blue 500 */
+        box-shadow: 0 0 0 1px #3b82f6 !important;
     }
     
-    /* Answer box styling */
+    /* Answer Analysis Box */
     .answer-box {
-        background: #f8f9fa;
-        border-radius: 12px;
-        padding: 1.5rem;
-        margin-top: 1rem;
-        border-left: 4px solid #28a745;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-left: 3px solid #0f172a;
+        border-radius: 8px;
+        padding: 24px;
+        margin-top: 24px;
     }
     
     .answer-title {
+        font-size: 12px;
         font-weight: 600;
-        color: #28a745;
-        margin-bottom: 0.75rem;
+        color: #64748b;
+        margin-bottom: 16px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
+    
+    /* Sidebar */
+    .sidebar .sidebar-content {
+        background: #f8fafc; /* Slate 50 */
+        border-right: 1px solid #e2e8f0;
+    }
+    
+    /* Remove streamlit branding padding if possible */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -177,42 +218,42 @@ def init_session_state():
 
 
 def render_header():
-    """Render the application header."""
+    """Render the application header following strict typography rules."""
     st.markdown("""
     <div class="header-container">
-        <div class="header-title">🔬 Endee Research Assistant</div>
+        <div class="header-title">Endee Research Assistant</div>
         <div class="header-subtitle">
-            Semantic search and AI-powered Q&A for research papers
+            Semantic search and document analysis powered by vector retrieval.
         </div>
     </div>
     """, unsafe_allow_html=True)
 
 
 def render_sidebar():
-    """Render the sidebar with configuration options."""
+    """Render the sidebar with crisp configuration groupings."""
     with st.sidebar:
-        st.markdown("## ⚙️ Configuration")
+        st.markdown("<h3 style='font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 16px;'>Configuration</h3>", unsafe_allow_html=True)
         
         # Connection status
-        st.markdown("### 📡 Endee Connection")
-        endee_host = st.text_input("Host", value="localhost")
-        endee_port = st.number_input("Port", value=8080, min_value=1, max_value=65535)
+        st.markdown("<div style='font-weight: 500; font-size: 14px; margin-bottom: 8px;'>Endee Connection</div>", unsafe_allow_html=True)
+        endee_host = st.text_input("Host", value="localhost", label_visibility="collapsed")
+        endee_port = st.number_input("Port", value=8080, min_value=1, max_value=65535, label_visibility="collapsed")
         
-        if st.button("Test Connection", use_container_width=True):
+        if st.button("Verify Connection", use_container_width=True):
             try:
                 from src.endee_client import EndeeClient
                 client = EndeeClient(host=endee_host, port=int(endee_port))
                 if client.connect():
-                    st.success("✅ Connected to Endee!")
+                    st.success("Connection verified.")
                 else:
-                    st.warning("⚠️ Could not verify connection")
+                    st.warning("Connection could not be established.")
             except Exception as e:
-                st.error(f"❌ Connection failed: {e}")
+                st.error(f"Connection failed: {e}")
         
         st.divider()
         
         # Model settings
-        st.markdown("### 🤖 Model Settings")
+        st.markdown("<div style='font-weight: 500; font-size: 14px; margin-bottom: 8px;'>Model Settings</div>", unsafe_allow_html=True)
         embedding_model = st.selectbox(
             "Embedding Model",
             options=[
@@ -220,52 +261,49 @@ def render_sidebar():
                 "all-mpnet-base-v2",
                 "paraphrase-MiniLM-L6-v2"
             ],
-            index=0
+            index=0,
+            label_visibility="collapsed"
         )
         
         llm_model = st.selectbox(
-            "LLM Model (for RAG)",
+            "LLM Model for Generation",
             options=["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-            index=0
+            index=0,
+            label_visibility="collapsed"
         )
         
         st.divider()
         
         # Data pipeline
-        st.markdown("### 📥 Index Papers")
+        st.markdown("<div style='font-weight: 500; font-size: 14px; margin-bottom: 8px;'>Index Data Segment</div>", unsafe_allow_html=True)
         category = st.selectbox(
-            "arXiv Category",
+            "arXiv Segment",
             options=["cs.AI", "cs.LG", "cs.CL", "cs.CV", "cs.IR"],
-            index=0
+            index=0,
+            label_visibility="collapsed"
         )
-        max_papers = st.slider("Max Papers", min_value=10, max_value=500, value=50)
+        max_papers = st.slider("Document Limit", min_value=10, max_value=500, value=50)
         
-        if st.button("🚀 Index Papers", use_container_width=True):
-            st.info("Starting indexing pipeline...")
+        if st.button("Index Documents", use_container_width=True):
             try:
                 from src.data_pipeline import DataPipeline
                 pipeline = DataPipeline()
-                with st.spinner(f"Fetching and indexing {max_papers} papers from {category}..."):
+                with st.spinner(f"Ingesting top {max_papers} documents from {category}..."):
                     stats = pipeline.run(category=category, max_papers=max_papers)
-                st.success(f"✅ Indexed {stats.get('vectors_indexed', 0)} vectors!")
+                st.success(f"Successfully indexed {stats.get('vectors_indexed', 0)} vectors.")
                 st.session_state.indexed_count = stats.get('vectors_indexed', 0)
             except Exception as e:
-                st.error(f"❌ Indexing failed: {e}")
+                st.error(f"Process failed: {e}")
         
         st.divider()
         
         # About section
-        st.markdown("### ℹ️ About")
+        st.markdown("<h3 style='font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 16px;'>System Information</h3>", unsafe_allow_html=True)
         st.markdown("""
-        **Endee Research Assistant** uses semantic 
-        search and RAG to help you explore research papers.
-        
-        Built with:
-        - 🗄️ [Endee](https://endee.io) Vector DB
-        - 🤗 Sentence-BERT Embeddings
-        - 🤖 Google Gemini
-        - 🎈 Streamlit
-        """)
+        <div style="font-size: 13px; color: #475569; line-height: 1.5;">
+        Architecture relies on Endee for vector storage, Sentence-BERT for embedding generation, and Google Gemini for synthesis.
+        </div>
+        """, unsafe_allow_html=True)
         
         return {
             "endee_host": endee_host,
@@ -276,23 +314,23 @@ def render_sidebar():
 
 
 def render_search_tab(config: dict):
-    """Render the semantic search tab."""
-    st.markdown("### 🔍 Semantic Paper Search")
-    st.markdown("Find papers by meaning, not just keywords. Try queries like *'methods to improve transformer efficiency'*")
+    """Render the semantic search interface."""
+    st.markdown("<div style='font-weight: 600; font-size: 20px; margin-bottom: 8px;'>Semantic Retrieval</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color: #64748b; font-size: 14px; margin-bottom: 24px;'>Retrieve documents by conceptual similarity rather than exact keyword matches.</div>", unsafe_allow_html=True)
     
     col1, col2 = st.columns([4, 1])
     with col1:
         query = st.text_input(
             "Search Query",
-            placeholder="Enter your search query...",
+            placeholder="e.g., methods to improve attention mechanism efficiency",
             label_visibility="collapsed"
         )
     with col2:
-        top_k = st.selectbox("Results", options=[5, 10, 15, 20], index=1, label_visibility="collapsed")
+        top_k = st.selectbox("Results Count", options=[5, 10, 15, 20], index=1, label_visibility="collapsed")
     
-    if st.button("🔍 Search", use_container_width=True) or query:
+    if st.button("Retrieve Documents", use_container_width=False) or query:
         if query:
-            with st.spinner("Searching..."):
+            with st.spinner("Processing retrieval..."):
                 try:
                     from src.semantic_search import SemanticSearch
                     search = SemanticSearch()
@@ -305,63 +343,63 @@ def render_search_tab(config: dict):
                     })
                     
                     if results:
-                        st.markdown(f"**Found {len(results)} relevant papers:**")
+                        st.markdown(f"<div style='font-size: 14px; font-weight: 500; margin: 24px 0 16px 0;'>Retrieved {len(results)} relevant documents</div>", unsafe_allow_html=True)
                         for i, paper in enumerate(results, 1):
                             with st.container():
                                 st.markdown(f"""
                                 <div class="result-card">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <div class="result-title">{i}. {paper.title}</div>
-                                        <span class="score-badge">Score: {paper.score:.3f}</span>
+                                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+                                        <div class="result-title">{paper.title}</div>
+                                        <span class="score-badge">Match: {paper.score:.4f}</span>
                                     </div>
                                     <div class="result-meta">
-                                        👤 {', '.join(paper.authors[:3]) if paper.authors else 'Unknown'} 
+                                        {', '.join(paper.authors[:3]) if paper.authors else 'Unknown'} 
                                         {'...' if paper.authors and len(paper.authors) > 3 else ''} 
-                                        | 🏷️ {', '.join(paper.categories[:2]) if paper.categories else 'N/A'}
-                                        {f" | 📅 {paper.published[:10]}" if paper.published else ""}
+                                        &bull; {', '.join(paper.categories[:2]) if paper.categories else 'Uncategorized'}
+                                        {f" &bull; {paper.published[:10]}" if paper.published else ""}
                                     </div>
                                     <div class="result-abstract">{paper.abstract[:400]}...</div>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
                                 if paper.arxiv_id:
-                                    st.markdown(f"[📄 View on arXiv](https://arxiv.org/abs/{paper.arxiv_id})")
+                                    st.markdown(f"<a href='https://arxiv.org/abs/{paper.arxiv_id}' style='font-size: 13px; color: #3b82f6; text-decoration: none; font-weight: 500;'>View Source Document &rarr;</a>", unsafe_allow_html=True)
+                                    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
                     else:
-                        st.info("No papers found. Try indexing some papers first using the sidebar.")
+                        st.info("No matching documents found in the current index.")
                         
                 except Exception as e:
-                    st.error(f"Search error: {e}")
-                    st.info("Make sure Endee is running and papers are indexed.")
+                    st.error(f"Retrieval error: {e}")
 
 
 def render_rag_tab(config: dict):
-    """Render the RAG Q&A tab."""
-    st.markdown("### 🤖 AI-Powered Research Q&A")
-    st.markdown("Ask questions and get answers grounded in research papers.")
+    """Render the document analysis tab."""
+    st.markdown("<div style='font-weight: 600; font-size: 20px; margin-bottom: 8px;'>Document Analysis</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color: #64748b; font-size: 14px; margin-bottom: 24px;'>Synthesize answers grounded strictly in the indexed literature corpus.</div>", unsafe_allow_html=True)
     
     # Check for API key
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
-        st.warning("⚠️ Gemini API key not set. Add `GEMINI_API_KEY` to your `.env` file to use RAG features.")
-        gemini_key = st.text_input("Or enter API key here:", type="password")
+        st.warning("System requires a Gemini API key. Configure GEMINI_API_KEY in the environment variables to proceed.")
+        return
     
     question = st.text_area(
-        "Your Question",
-        placeholder="e.g., What are the main approaches to reduce the memory footprint of large language models?",
-        height=100
+        "Analysis Prompt",
+        placeholder="Enter your specific question regarding the literature...",
+        height=120,
+        label_visibility="collapsed"
     )
     
-    col1, col2 = st.columns([3, 1])
+    col1, col2 = st.columns([1, 3])
     with col1:
-        num_papers = st.slider("Papers to consider", min_value=3, max_value=10, value=5)
+        st.markdown("<div style='font-size: 14px; font-weight: 500; margin-bottom: 8px;'>Context Depth</div>", unsafe_allow_html=True)
+        num_papers = st.slider("Source Documents", min_value=3, max_value=10, value=5, label_visibility="collapsed")
     
-    if st.button("🧠 Get Answer", use_container_width=True):
+    if st.button("Synthesize Analysis", use_container_width=False):
         if not question:
-            st.warning("Please enter a question.")
-        elif not gemini_key:
-            st.error("Gemini API key required for RAG.")
+            st.warning("Prompt requires input.")
         else:
-            with st.spinner("Researching and generating answer..."):
+            with st.spinner("Analyzing corpus and generating synthesis..."):
                 try:
                     from src.rag_engine import RAGEngine
                     rag = RAGEngine(gemini_api_key=gemini_key, model=config.get("llm_model", "gemini-2.0-flash"))
@@ -370,55 +408,83 @@ def render_rag_tab(config: dict):
                     # Display answer
                     st.markdown("""
                     <div class="answer-box">
-                        <div class="answer-title">📝 Answer</div>
-                    </div>
+                        <div class="answer-title">Synthesis Result</div>
+                        <div style="font-size: 15px; line-height: 1.6; color: #1e293b;">
                     """, unsafe_allow_html=True)
                     st.markdown(response.answer)
+                    st.markdown("</div></div>", unsafe_allow_html=True)
                     
-                    # Display confidence
-                    confidence_color = "green" if response.confidence > 0.7 else "orange" if response.confidence > 0.4 else "red"
-                    st.markdown(f"**Confidence:** :{confidence_color}[{response.confidence:.0%}]")
+                    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+                    
+                    # Evaluation Metrics
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("<div style='font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; margin-bottom: 4px;'>Confidence Metric</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='font-size: 16px; font-weight: 500; color: #0f172a;'>{response.confidence:.1%}</div>", unsafe_allow_html=True)
+                    
+                    with col_b:
+                        if response.tokens_used:
+                            st.markdown("<div style='font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; margin-bottom: 4px;'>Compute Usage</div>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='font-size: 16px; font-weight: 500; color: #0f172a;'>{response.tokens_used} tokens</div>", unsafe_allow_html=True)
+                    
+                    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
                     
                     # Display sources
                     if response.sources:
-                        with st.expander(f"📚 Sources ({len(response.sources)} papers)", expanded=False):
-                            for source in response.sources:
-                                st.markdown(f"- **{source['title']}** - {', '.join(source.get('authors', [])[:2])}")
-                    
-                    # Token usage
-                    if response.tokens_used:
-                        st.caption(f"Tokens used: {response.tokens_used}")
+                        st.markdown("<div style='font-size: 14px; font-weight: 600; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;'>Referenced Documents</div>", unsafe_allow_html=True)
+                        for source in response.sources:
+                            st.markdown(f"""
+                            <div style="font-size: 13px; color: #334155; margin-bottom: 8px;">
+                                <span style="font-weight: 500; color: #0f172a;">{source['title']}</span> 
+                                <span style="color: #94a3b8;">&nbsp;|&nbsp;</span> 
+                                {', '.join(source.get('authors', [])[:2])}
+                            </div>
+                            """, unsafe_allow_html=True)
                         
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Analysis process encountered an error: {e}")
 
 
 def render_stats_tab():
-    """Render collection statistics."""
-    st.markdown("### 📊 Collection Statistics")
+    """Render database integrity and corpus statistics."""
+    st.markdown("<div style='font-weight: 600; font-size: 20px; margin-bottom: 8px;'>Corpus Statistics</div>", unsafe_allow_html=True)
+    st.markdown("<div style='color: #64748b; font-size: 14px; margin-bottom: 32px;'>Current state of the indexed vector database.</div>", unsafe_allow_html=True)
     
     try:
         from src.endee_client import get_endee_client
         client = get_endee_client()
         stats = client.get_collection_stats("research_papers")
         
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("📄 Total Vectors", stats.get("vector_count", 0))
-        with col2:
-            st.metric("📐 Dimension", stats.get("dimension", 384))
-        with col3:
-            st.metric("🗂️ Index Type", stats.get("index_type", "HNSW").upper())
+        st.markdown(f"""
+        <div class="stats-container">
+            <div class="stat-card">
+                <div class="stat-value">{stats.get("vector_count", 0):,}</div>
+                <div class="stat-label">Total Vectors</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{stats.get("dimension", 384)}</div>
+                <div class="stat-label">Vector Dimension</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{str(stats.get("index_type", "HNSW")).upper()}</div>
+                <div class="stat-label">Index Type</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
     except Exception as e:
-        st.info("No statistics available. Index some papers first.")
+        st.info("System unable to retrieve index statistics. Ensure Endee is running and the index exists.")
     
-    # Search history
+    # Search history log
     if st.session_state.search_history:
-        st.markdown("### 📜 Recent Searches")
-        for item in st.session_state.search_history[-5:][::-1]:
-            st.markdown(f"- `{item['query']}` ({item['results_count']} results)")
+        st.markdown("<div style='font-weight: 600; font-size: 16px; margin: 32px 0 16px 0;'>Retrieval Log</div>", unsafe_allow_html=True)
+        for item in st.session_state.search_history[-10:][::-1]:
+            st.markdown(f"""
+            <div style="display: flex; justify-content: space-between; padding: 12px; border-bottom: 1px solid #f1f5f9; font-size: 13px;">
+                <div style="font-family: ui-monospace, monospace; color: #334155;">"{item['query']}"</div>
+                <div style="color: #64748b;">{item['results_count']} results</div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
 def main():
@@ -429,8 +495,31 @@ def main():
     # Sidebar configuration
     config = render_sidebar()
     
-    # Main content tabs
-    tab1, tab2, tab3 = st.tabs(["🔍 Search", "🤖 Ask AI", "📊 Stats"])
+    # Clean up streamlit spacing for tabs
+    st.markdown("""
+        <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 24px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 48px;
+            white-space: pre-wrap;
+            background-color: transparent;
+            border-radius: 0px 0px 0px 0px;
+            gap: 1px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+        }
+        .stTabs [aria-selected="true"] {
+            font-weight: 600 !important;
+            color: #0f172a !important;
+            border-bottom-color: #0f172a !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Main content tabs (removed emojis)
+    tab1, tab2, tab3 = st.tabs(["Retrieval", "Analysis", "Metrics"])
     
     with tab1:
         render_search_tab(config)
@@ -442,11 +531,11 @@ def main():
         render_stats_tab()
     
     # Footer
-    st.divider()
+    st.markdown("<div style='height: 48px;'></div>", unsafe_allow_html=True)
     st.markdown(
         """
-        <div style="text-align: center; color: #666; font-size: 0.85rem;">
-            Built with ❤️ using <a href="https://endee.io">Endee</a> Vector Database
+        <div style="border-top: 1px solid #e2e8f0; padding-top: 24px; text-align: left; color: #94a3b8; font-size: 12px; letter-spacing: 0.02em;">
+            Endee Information Retrieval System &bull; Version 1.0.0
         </div>
         """,
         unsafe_allow_html=True
