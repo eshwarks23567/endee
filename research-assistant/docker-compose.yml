@@ -1,0 +1,45 @@
+services:
+  endee:
+    image: endeeio/endee-server:latest
+    container_name: endee-server
+    ports:
+      - "8080:8080"
+    ulimits:
+      nofile: 100000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    environment:
+      NDD_NUM_THREADS: 0
+      NDD_AUTH_TOKEN: ""
+    volumes:
+      - endee-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  research-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: research-assistant
+    ports:
+      - "8501:8501"
+    depends_on:
+      endee:
+        condition: service_healthy
+    environment:
+      - ENDEE_HOST=endee
+      - ENDEE_PORT=8080
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  endee-data:
