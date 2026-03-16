@@ -17,6 +17,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Monkeypatch for Endee SDK bug where it calls v_item.get() on a Pydantic model
+try:
+    from endee.schema import VectorItem
+    if not hasattr(VectorItem, "get"):
+        VectorItem.get = lambda self, key, default=None: getattr(self, key, default)
+except ImportError:
+    pass
+
 
 @dataclass
 class SearchResult:
